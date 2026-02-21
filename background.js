@@ -124,7 +124,7 @@ async function getActiveTabTranslationState() {
 async function translateWithGemini(payload) {
   const safePayload = {
     segments: (payload && payload.segments) || [],
-    sourceLanguage: (payload && payload.sourceLanguage) || "en",
+    sourceLanguage: (payload && payload.sourceLanguage) || "auto",
     targetLanguage: (payload && payload.targetLanguage) || DEFAULT_TARGET_LANGUAGE
   };
 

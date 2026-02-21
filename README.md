@@ -4,7 +4,7 @@ Chrome MV3 extension with a local Gemini proxy for translating course subtitles 
 
 ## Overview
 
-This project translates English subtitle cues on online course video pages into a selected target language.
+This project translates subtitle cues on online course video pages from the available source subtitle language into a selected target language.
 Translation is handled by a local Node.js proxy that calls the Gemini API and applies language-specific prompt rules.
 
 ## Repository Structure
