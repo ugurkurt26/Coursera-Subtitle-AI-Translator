@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "prompt_template": {
+    "role_line": "You are a senior subtitle translator for online courses.",
+    "translate_line_template": "Translate from {{source_language}} to {{target_language}}.",
+    "rules_heading": "Rules:",
+    "input_heading": "Input:"
+  },
+  "common_rules": [
+    "Preserve full meaning and context.",
+    "Never translate protected technical words into generic local equivalents.",
+    "Keep platform, software, networking, data, and code terms (commands, APIs, file paths, library names, identifiers) unchanged.",
+    "Maintain concise subtitle style and readability.",
+    "Do not merge, split, reorder or drop indexes.",
+    "Return valid JSON only.",
+    "JSON format must be exactly: {\"translations\":[{\"index\":0,\"text\":\"...\"}]}",
+    "Explicitly avoid replacing protected technical terms with non-technical local synonyms.",
+    "Placeholder tokens in form __TERM_x_y__ are immutable; copy them exactly and never translate them.",
+    "Return one translation item for each input segment index."
+  ],
+  "language_rules": {
+    "default": {
+      "style_rule": "Keep technical nouns in their original English form whenever translation reduces precision.",
+      "extra_rules": [
+        "Use natural, idiomatic target-language grammar while keeping technical precision."
+      ]
+    },
+    "tr": {
+      "style_rule": "Use professional hybrid Turkish wording. Keep technical nouns in English roots and attach Turkish suffixes naturally.",
+      "extra_rules": [
+        "Turkish inflection policy (strict): keep the technical root unchanged and attach Turkish suffixes with apostrophe when needed: process'ler, process'in, process'i, service'de, thread'ler.",
+        "Turkish abbreviation policy (strict): add Turkish suffixes to abbreviations in a way that fits the sentence naturally; when the abbreviation is read together with its suffix, the sentence meaning must stay clear and unchanged.",
+        "Prefer readable modern Turkish while preserving technical terminology in original form."
+      ]
+    },
+    "es": {
+      "style_rule": "Use neutral technical Spanish while preserving protected English technical roots.",
+      "extra_rules": [
+        "Prefer concise subtitle phrasing and avoid over-literal wording."
+      ]
+    },
+    "fr": {
+      "style_rule": "Use clear technical French while preserving protected English technical roots.",
+      "extra_rules": [
+        "Prefer concise wording suitable for subtitles."
+      ]
+    },
+    "de": {
+      "style_rule": "Use precise technical German while preserving protected English technical roots.",
+      "extra_rules": [
+        "Keep sentence flow natural and compact for subtitle reading speed."
+      ]
+    },
+    "pt": {
+      "style_rule": "Use neutral technical Portuguese while preserving protected English technical roots.",
+      "extra_rules": [
+        "Prefer concise subtitle-ready phrasing."
+      ]
+    },
+    "it": {
+      "style_rule": "Use clear technical Italian while preserving protected English technical roots.",
+      "extra_rules": [
+        "Keep wording compact and natural for subtitles."
+      ]
+    },
+    "ar": {
+      "style_rule": "Use modern technical Arabic while preserving protected English technical roots.",
+      "extra_rules": [
+        "Prefer readability and clarity over literal translation."
+      ]
+    },
+    "ru": {
+      "style_rule": "Use clear technical Russian while preserving protected English technical roots.",
+      "extra_rules": [
+        "Keep subtitle lines concise and easy to follow."
+      ]
+    },
+    "ja": {
+      "style_rule": "Use natural technical Japanese while preserving protected English technical roots.",
+      "extra_rules": [
+        "Favor concise subtitle phrasing without losing technical meaning."
+      ]
+    },
+    "ko": {
+      "style_rule": "Use natural technical Korean while preserving protected English technical roots.",
+      "extra_rules": [
+        "Keep sentence flow compact and subtitle-friendly."
+      ]
+    },
+    "zh": {
+      "style_rule": "Use simplified Chinese technical phrasing while preserving protected English technical roots.",
+      "extra_rules": [
+        "Prefer concise and clear subtitle wording."
+      ]
+    },
+    "hi": {
+      "style_rule": "Use clear technical Hindi while preserving protected English technical roots.",
+      "extra_rules": [
+        "Maintain concise subtitle readability and technical accuracy."
+      ]
+    },
+    "id": {
+      "style_rule": "Use natural technical Indonesian while preserving protected English technical roots.",
+      "extra_rules": [
+        "Prefer concise wording suitable for subtitle speed."
+      ]
+    }
+  }
+}
