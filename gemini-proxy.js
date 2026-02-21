@@ -21,6 +21,7 @@ const DEFAULT_TERMS_SOURCE = path.join(__dirname, "tech_terms_dictionary.json");
 const DEFAULT_PROMPT_RULES_SOURCE = path.join(__dirname, "prompt-rules.json");
 
 const LANGUAGE_MAP = {
+  auto: "Auto-detected source language",
   tr: "Turkish",
   en: "English",
   es: "Spanish",
@@ -93,11 +94,11 @@ async function translateRequest(payload) {
   const cleanedSegments = segments.map((item) => normalizeSegment(item));
   const indexedSegments = cleanedSegments.map((text, index) => ({ index, text }));
 
-  const sourceLanguage = normalizeLanguage(payload && payload.sourceLanguage, "en");
+  const sourceLanguage = normalizeLanguage(payload && payload.sourceLanguage, "auto");
   const targetLanguage = normalizeLanguage(payload && payload.targetLanguage, "tr");
-  const protectedTerms = extractProtectedTerms(cleanedSegments);
+  const protectedTerms = extractProtectedTerms(cleanedSegments, targetLanguage);
   const promptTerms = protectedTerms.slice(0, 90);
-  const preparedSegments = prepareSegmentsForTranslation(indexedSegments, protectedTerms);
+  const preparedSegments = prepareSegmentsForTranslation(indexedSegments, protectedTerms, targetLanguage);
 
   const fullPrompt = buildTranslationPrompt({
     sourceLanguage,
@@ -184,7 +185,7 @@ async function translateChunk({ sourceLanguage, targetLanguage, segments, contex
       }
     ],
     generationConfig: {
-      temperature: 0.1,
+      temperature: 0,
       responseMimeType: "application/json",
       responseSchema: {
         type: "OBJECT",
@@ -295,14 +296,8 @@ function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, cont
     source_language: sourceLanguageName,
     target_language: targetLanguageName,
     protected_terms: protectedTerms,
-    context_before: contextBefore.map((item) => ({
-      index: item.index,
-      text: item.text
-    })),
-    segments: segments.map((item) => ({
-      index: item.index,
-      text: item.text
-    }))
+    context_before: contextBefore.map((item) => buildPromptSegment(item)),
+    segments: segments.map((item) => buildPromptSegment(item))
   };
 
   return [
@@ -318,9 +313,25 @@ function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, cont
   ].join("\n");
 }
 
-function prepareSegmentsForTranslation(indexedSegments, protectedTerms) {
+function buildPromptSegment(item) {
+  const payload = {
+    index: item.index,
+    text: item.text
+  };
+
+  if (Array.isArray(item.placeholders) && item.placeholders.length) {
+    payload.placeholder_map = item.placeholders.map((entry) => ({
+      placeholder: entry.placeholder,
+      value: entry.value
+    }));
+  }
+
+  return payload;
+}
+
+function prepareSegmentsForTranslation(indexedSegments, protectedTerms, targetLanguage) {
   return indexedSegments.map((segment) => {
-    const masked = maskSegmentTerms(segment.text, protectedTerms, segment.index);
+    const masked = maskSegmentTerms(segment.text, protectedTerms, segment.index, targetLanguage);
     return {
       index: segment.index,
       text: masked.text,
@@ -330,7 +341,7 @@ function prepareSegmentsForTranslation(indexedSegments, protectedTerms) {
   });
 }
 
-function maskSegmentTerms(text, protectedTerms, segmentIndex) {
+function maskSegmentTerms(text, protectedTerms, segmentIndex, targetLanguage) {
   let maskedText = text;
   const placeholders = [];
   let counter = 0;
@@ -338,6 +349,10 @@ function maskSegmentTerms(text, protectedTerms, segmentIndex) {
 
   for (const term of sortedTerms) {
     if (!term || term.length < 2) {
+      continue;
+    }
+
+    if (!shouldMaskTermForLanguage(term, targetLanguage)) {
       continue;
     }
 
@@ -353,6 +368,26 @@ function maskSegmentTerms(text, protectedTerms, segmentIndex) {
   return { text: maskedText, placeholders };
 }
 
+function shouldMaskTermForLanguage(term, targetLanguage) {
+  if (String(targetLanguage || "").toLowerCase() !== "tr") {
+    return true;
+  }
+
+  if (term.includes(" ")) {
+    return true;
+  }
+
+  if (/[0-9]/.test(term)) {
+    return true;
+  }
+
+  if (/[._/:+-]/.test(term)) {
+    return true;
+  }
+
+  return false;
+}
+
 function restorePlaceholders(text, placeholders) {
   let output = text;
   for (const item of placeholders || []) {
@@ -365,7 +400,7 @@ function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function extractProtectedTerms(segments) {
+function extractProtectedTerms(segments, targetLanguage) {
   const terms = new Set(ALWAYS_PROTECT_TERMS);
   const tokenRegex = /\b[A-Za-z][A-Za-z0-9_./:+-]{1,40}\b/g;
 
@@ -374,7 +409,7 @@ function extractProtectedTerms(segments) {
     let match;
     while ((match = tokenRegex.exec(segment)) !== null) {
       const token = match[0];
-      if (shouldProtectToken(token)) {
+      if (shouldProtectToken(token, targetLanguage)) {
         terms.add(token);
       }
     }
@@ -390,23 +425,26 @@ function extractProtectedTerms(segments) {
     .slice(0, 400);
 }
 
-function shouldProtectToken(token) {
+function shouldProtectToken(token, targetLanguage) {
   const lower = token.toLowerCase();
+  const isTurkishTarget = String(targetLanguage || "").toLowerCase() === "tr";
 
   if (CANDIDATE_TERM_SET.has(lower)) {
     return true;
   }
 
-  if (lower.endsWith("ies") && CANDIDATE_TERM_SET.has(lower.slice(0, -3) + "y")) {
-    return true;
-  }
+  if (!isTurkishTarget) {
+    if (lower.endsWith("ies") && CANDIDATE_TERM_SET.has(lower.slice(0, -3) + "y")) {
+      return true;
+    }
 
-  if (lower.endsWith("es") && CANDIDATE_TERM_SET.has(lower.slice(0, -2))) {
-    return true;
-  }
+    if (lower.endsWith("es") && CANDIDATE_TERM_SET.has(lower.slice(0, -2))) {
+      return true;
+    }
 
-  if (lower.endsWith("s") && CANDIDATE_TERM_SET.has(lower.slice(0, -1))) {
-    return true;
+    if (lower.endsWith("s") && CANDIDATE_TERM_SET.has(lower.slice(0, -1))) {
+      return true;
+    }
   }
 
   if (token.length > 2 && /[._/:+-]/.test(token)) {
