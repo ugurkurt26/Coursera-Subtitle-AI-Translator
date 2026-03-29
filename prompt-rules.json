@@ -9,14 +9,17 @@
   "common_rules": [
     "Preserve full meaning and context.",
     "Never translate protected technical words into generic local equivalents.",
-    "Keep platform, software, networking, data, and code terms (commands, APIs, file paths, library names, identifiers) unchanged.",
+    "Keep only explicitly protected commands, APIs, file paths, library names, product names, model names, and code identifiers unchanged.",
+    "Any source token containing an internal hyphen between alphanumeric parts (for example race-condition, mutex-lock, thread-safe) is a protected technical form and must remain unchanged.",
+    "Translate every non-protected word into the target language; do not leave ordinary source-language words untranslated.",
+    "Use only the target language plus explicitly protected source technical terms; never introduce a third language.",
     "Maintain concise subtitle style and readability.",
     "Do not merge, split, reorder or drop indexes.",
     "Return valid JSON only.",
     "JSON format must be exactly: {\"translations\":[{\"index\":0,\"text\":\"...\"}]}",
     "Explicitly avoid replacing protected technical terms with non-technical local synonyms.",
-    "Placeholder tokens in form __TERM_x_y__ are immutable internally; never change characters inside them and never translate them.",
-    "If placeholder_map is provided for a segment, use each mapped source term to choose surrounding grammar or suffixes; you may append suffixes immediately after placeholders.",
+    "Placeholder tokens in form __TERM_x_y__ are opaque immutable spans; never change characters inside them, never translate them, and never infer or paraphrase their hidden source values.",
+    "If an input segment contains placeholder tokens, every placeholder from that segment must appear verbatim in the output segment.",
     "Do not leak English possessive/plural residue into non-English output (forbidden patterns unless part of an immutable identifier: 's, -es, stray plural -s).",
     "Return one translation item for each input segment index."
   ],
@@ -28,15 +31,18 @@
       ]
     },
     "tr": {
-      "style_rule": "Use professional hybrid Turkish wording. Keep technical nouns in English roots and attach Turkish suffixes naturally.",
+      "style_rule": "Use natural technical Turkish. Preserve only immutable English technical forms, and prefer established Turkish equivalents for ordinary technical concepts.",
       "extra_rules": [
+        "Translate all ordinary English context words fully into Turkish; preserve only protected technical roots, commands, identifiers, and explicitly protected technical phrases.",
+        "For ordinary computer science concepts that are not immutable identifiers, commands, filenames, model names, or source hyphen-forms, prefer established Turkish equivalents instead of leaving the English phrase in place.",
         "Turkish inflection policy (strict): keep English technical roots unchanged, then apply Turkish suffixes by pronunciation (okunuş), not by English spelling.",
-        "Never keep English inflection endings on technical roots in Turkish output (forbidden: processes, thread's, APIs' default English possessives/plurals). Convert these to Turkish suffix forms.",
-        "For consonant-ending roots, use consonant-ending possessive/case behavior: process'iniz, thread'iniz, process'i; avoid over-rounded forms such as process'ünüz/thread'ünüz unless pronunciation requires it.",
+        "Never keep English inflection endings on technical roots in Turkish output. Convert number, case, and possession to Turkish suffix forms.",
+        "When preserving a foreign root, choose Turkish suffixes by pronunciation and standard written Turkish, not by copying English inflection.",
         "For abbreviations, decide suffixes by reading form: if read letter-by-letter use the last letter name; if commonly read as a word use that word pronunciation.",
-        "Abbreviation correctness examples (strict): IPC'yi, CPU'suna, RAM'ine. Incorrect: IPC'ü, CPU'üne, RAM'sine.",
         "Linking consonants must be correct: use -y- after vowel-final forms, use -n- after possessive+case combinations, and do not insert -s- after consonant-final roots.",
-        "Use apostrophe before Turkish suffixes on preserved foreign roots and abbreviations when needed: process'in, thread'ler, API'ler, CPU'su.",
+        "Use apostrophe before Turkish suffixes on preserved foreign roots and abbreviations when standard Turkish orthography requires it.",
+        "Do not fuse preserved English technical roots into foreign hyphen compounds; keep the root standalone and attach only valid Turkish suffixes when needed.",
+        "Never rewrite any part of the subtitle into another non-target language, even inside compounds or hyphenated words.",
         "Final self-check before output: root preserved, no English plural/possessive residue, and Turkish vowel harmony plus linking consonants are consistent.",
         "Prefer readable modern Turkish while preserving technical terminology in original form."
       ]

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Coursera Subtitle AI Translator",
   "version": "4.0.0",
-  "description": "Translate Coursera video subtitles with AI-powered semantic grouping via a local Gemini proxy.",
+  "description": "Translate Coursera subtitles with Gemini, OpenAI, Claude, or DeepSeek.",
   "icons": {
     "16": "icons/icon-16.png",
     "48": "icons/icon-48.png",
@@ -37,7 +37,9 @@
     "storage"
   ],
   "host_permissions": [
-    "http://127.0.0.1/*",
-    "http://localhost/*"
+    "https://generativelanguage.googleapis.com/*",
+    "https://api.openai.com/*",
+    "https://api.anthropic.com/*",
+    "https://api.deepseek.com/*"
   ]
 }

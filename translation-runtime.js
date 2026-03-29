@@ -1,28 +1,72 @@
-const fs = require("fs");
-const http = require("http");
-const path = require("path");
+(() => {
+function resolveBundledSource(name) {
+  if (typeof chrome !== "undefined" && chrome.runtime && typeof chrome.runtime.getURL === "function") {
+    return chrome.runtime.getURL(name);
+  }
+
+  return name;
+}
 
 // ── Configuration ──
 
-const PORT = Number(process.env.GEMINI_PROXY_PORT || 8787);
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const DEFAULT_PROVIDER_MODELS = {
+  gemini: "gemini-3.1-flash-lite-preview",
+  openai: "gpt-5.4-mini",
+  anthropic: "claude-sonnet-4-20250514",
+  deepseek: "deepseek-chat"
+};
+const DEFAULT_PROVIDER = "gemini";
 
 const FULL_INPUT_TOKEN_LIMIT = 1048576;
 const FULL_OUTPUT_TOKEN_LIMIT = 65536;
 const FULL_INPUT_SAFE_LIMIT = Math.floor(FULL_INPUT_TOKEN_LIMIT * 0.9);
 const FULL_OUTPUT_SAFE_LIMIT = Math.floor(FULL_OUTPUT_TOKEN_LIMIT * 0.85);
 
-const CHUNK_CHAR_LIMIT = Number(process.env.CHUNK_CHAR_LIMIT || 8000);
-const CHUNK_CONTEXT_WINDOW = Number(process.env.CHUNK_CONTEXT_WINDOW || 4);
-const PARALLEL_CHUNK_CONCURRENCY = Number(process.env.PARALLEL_CHUNK_CONCURRENCY || 2);
-const SINGLE_REQUEST_INPUT_BUDGET = Number(process.env.SINGLE_REQUEST_INPUT_BUDGET || 1800);
-const SINGLE_REQUEST_OUTPUT_BUDGET = Number(process.env.SINGLE_REQUEST_OUTPUT_BUDGET || 1200);
-const SINGLE_REQUEST_SEGMENT_BUDGET = Number(process.env.SINGLE_REQUEST_SEGMENT_BUDGET || 25);
+const CHUNK_CHAR_LIMIT = 8000;
+const CHUNK_CONTEXT_WINDOW = 4;
+const PARALLEL_CHUNK_CONCURRENCY = 2;
+const SINGLE_REQUEST_INPUT_BUDGET = 1800;
+const SINGLE_REQUEST_OUTPUT_BUDGET = 1200;
+const SINGLE_REQUEST_SEGMENT_BUDGET = 25;
 
-const DEFAULT_TERMS_SOURCE = path.join(__dirname, "tech_terms_dictionary.json");
-const DEFAULT_PROMPT_RULES_SOURCE = path.join(__dirname, "prompt-rules.json");
-const PROMPT_RULES_SOURCE = process.env.PROMPT_RULES_SOURCE || DEFAULT_PROMPT_RULES_SOURCE;
+const DEFAULT_TERMS_SOURCE = resolveBundledSource("tech_terms_dictionary.json");
+const DEFAULT_PROMPT_RULES_SOURCE = resolveBundledSource("prompt-rules.json");
+const PROMPT_RULES_SOURCE = DEFAULT_PROMPT_RULES_SOURCE;
+const UNICODE_DASH_REGEX = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g;
+const TECHNICAL_PHRASE_STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "are",
+  "as",
+  "at",
+  "be",
+  "by",
+  "for",
+  "from",
+  "in",
+  "into",
+  "is",
+  "it",
+  "of",
+  "on",
+  "or",
+  "that",
+  "the",
+  "their",
+  "this",
+  "those",
+  "to",
+  "was",
+  "were",
+  "with"
+]);
+const TURKISH_RETRY_PROMPT_RULES = [
+  "Translate the full segment into natural Turkish.",
+  "Do not leave the whole segment unchanged in English unless the segment is entirely an immutable identifier, command, file path, or code snippet.",
+  "Keep only clearly immutable technical tokens in English; translate the surrounding explanation fully into Turkish.",
+  "Avoid introducing compounds or morphology from a non-target language."
+];
 
 // ── Language Map ──
 
@@ -52,48 +96,13 @@ let alwaysProtectTerms = [];
 let candidateTerms = [];
 let candidateTermSet = new Set();
 let candidatePhraseSet = new Set();
+let candidateWordSet = new Set();
+let candidateHeadWordSet = new Set();
 let promptRulesConfig = null;
 
 // ── Entry Point ──
 
-if (!GEMINI_API_KEY) {
-  console.error("[FATAL] GEMINI_API_KEY is missing. Export it before starting the proxy.");
-  process.exit(1);
-}
-
-const server = http.createServer(async (req, res) => {
-  setCorsHeaders(res);
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  if (req.method === "GET" && req.url === "/health") {
-    sendJson(res, 200, { ok: true, model: GEMINI_MODEL });
-    return;
-  }
-
-  if (req.method === "POST" && req.url === "/translate") {
-    try {
-      const body = await readJsonBody(req);
-      const response = await translateRequest(body);
-      sendJson(res, 200, response);
-    } catch (error) {
-      log("error", `Translation failed: ${error.message}`);
-      sendJson(res, 400, { ok: false, error: error.message });
-    }
-    return;
-  }
-
-  sendJson(res, 404, { ok: false, error: "Route not found." });
-});
-
-bootstrap().catch((error) => {
-  console.error(`[FATAL] Proxy failed to start: ${error.message}`);
-  process.exit(1);
-});
+let bootstrapPromise = null;
 
 // ── Translation Pipeline ──
 
@@ -109,6 +118,9 @@ async function translateRequest(payload) {
 
   const sourceLanguage = normalizeLanguage(payload && payload.sourceLanguage, "auto");
   const targetLanguage = normalizeLanguage(payload && payload.targetLanguage, "tr");
+  const provider = normalizeProvider(payload && payload.provider);
+  const model = resolveProviderModel(provider, payload && payload.model);
+  const apiKey = resolveProviderApiKey(provider, payload && payload.apiKey);
   const protectedTerms = extractProtectedTerms(cleanedSegments, targetLanguage);
   const promptTerms = protectedTerms.slice(0, 90);
   const preparedSegments = prepareSegmentsForTranslation(indexedSegments, protectedTerms, targetLanguage);
@@ -130,28 +142,31 @@ async function translateRequest(payload) {
     preparedSegments.length <= SINGLE_REQUEST_SEGMENT_BUDGET;
 
   if (shouldUseSingleRequest) {
-    log("info", `Single-request mode (${preparedSegments.length} segments, ~${inputTokenCount} input tokens)`);
+    log("info", `Single-request mode (${preparedSegments.length} segments, ~${inputTokenCount} input tokens, provider: ${provider}, model: ${model})`);
 
     const translated = await translateChunk({
       sourceLanguage,
       targetLanguage,
       segments: preparedSegments,
       contextBefore: [],
-      promptTerms
+      promptTerms,
+      provider,
+      model,
+      apiKey
     });
 
     return {
       ok: true,
       mode: "single",
       translations: toOrderedTranslations(indexedSegments, translated),
-      tokenInfo: { inputTokenCount, estimatedOutputTokens, chunkCount: 1 }
+      tokenInfo: { inputTokenCount, estimatedOutputTokens, chunkCount: 1, provider, model }
     };
   }
 
   const chunks = splitByCharacterBudget(preparedSegments, CHUNK_CHAR_LIMIT);
   const parallelism = Math.max(1, Math.min(PARALLEL_CHUNK_CONCURRENCY, chunks.length));
 
-  log("info", `Chunked mode (${chunks.length} chunks, concurrency: ${parallelism})`);
+  log("info", `Chunked mode (${chunks.length} chunks, concurrency: ${parallelism}, provider: ${provider}, model: ${model})`);
 
   const translatedChunks = await mapChunksWithConcurrency(
     chunks,
@@ -159,7 +174,7 @@ async function translateRequest(payload) {
     async (chunk) => {
       const contextStart = Math.max(0, chunk[0].index - CHUNK_CONTEXT_WINDOW);
       const contextBefore = preparedSegments.slice(contextStart, chunk[0].index);
-      return translateChunk({ sourceLanguage, targetLanguage, segments: chunk, contextBefore, promptTerms });
+      return translateChunk({ sourceLanguage, targetLanguage, segments: chunk, contextBefore, promptTerms, provider, model, apiKey });
     }
   );
 
@@ -167,51 +182,85 @@ async function translateRequest(payload) {
     ok: true,
     mode: "chunked",
     translations: toOrderedTranslations(indexedSegments, translatedChunks.flat()),
-    tokenInfo: { inputTokenCount, estimatedOutputTokens, chunkCount: chunks.length, parallelism }
+    tokenInfo: { inputTokenCount, estimatedOutputTokens, chunkCount: chunks.length, parallelism, provider, model }
   };
 }
 
-async function translateChunk({ sourceLanguage, targetLanguage, segments, contextBefore, promptTerms }) {
+async function translateChunk({ sourceLanguage, targetLanguage, segments, contextBefore, promptTerms, provider, model, apiKey }) {
+  const initialTranslations = await translateChunkOnce({
+    sourceLanguage,
+    targetLanguage,
+    segments,
+    contextBefore,
+    promptTerms,
+    provider,
+    model,
+    apiKey,
+    extraRules: []
+  });
+
+  if (String(targetLanguage || "").toLowerCase() !== "tr") {
+    return initialTranslations;
+  }
+
+  const initialMap = new Map(initialTranslations.map((item) => [item.index, item.text]));
+  const retrySegments = segments.filter((segment) =>
+    shouldRetryTurkishSegment(segment, initialMap.get(segment.index) || segment.originalText)
+  );
+
+  if (!retrySegments.length) {
+    return initialTranslations;
+  }
+
+  log("info", `Retrying ${retrySegments.length} unchanged Turkish segment(s)`);
+
+  const retriedTranslations = await translateChunkOnce({
+    sourceLanguage,
+    targetLanguage,
+    segments: retrySegments,
+    contextBefore: [],
+    promptTerms,
+    provider,
+    model,
+    apiKey,
+    extraRules: TURKISH_RETRY_PROMPT_RULES
+  });
+  const retryMap = new Map(retriedTranslations.map((item) => [item.index, item.text]));
+
+  return segments.map((segment) => {
+    const initialText = initialMap.get(segment.index) || segment.originalText;
+    const retryText = retryMap.get(segment.index);
+
+    if (retryText && normalizeSegment(retryText) !== normalizeSegment(segment.originalText)) {
+      return { index: segment.index, text: retryText };
+    }
+
+    return { index: segment.index, text: initialText };
+  });
+}
+
+async function translateChunkOnce({ sourceLanguage, targetLanguage, segments, contextBefore, promptTerms, provider, model, apiKey, extraRules }) {
   const prompt = buildTranslationPrompt({
     sourceLanguage,
     targetLanguage,
     segments,
     contextBefore,
-    protectedTerms: promptTerms
+    protectedTerms: promptTerms,
+    extraRules
   });
 
-  const body = {
-    contents: [{ role: "user", parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "OBJECT",
-        required: ["translations"],
-        properties: {
-          translations: {
-            type: "ARRAY",
-            items: {
-              type: "OBJECT",
-              required: ["index", "text"],
-              properties: {
-                index: { type: "INTEGER" },
-                text: { type: "STRING" }
-              }
-            }
-          }
-        }
-      }
-    }
-  };
-
-  const json = await callGeminiApi("generateContent", body);
-  const responseText = extractResponseText(json);
+  const responseText = await translatePromptWithProvider({
+    provider,
+    model,
+    apiKey,
+    prompt,
+    maxOutputTokens: estimateOutputTokens(segments.map((item) => item.originalText || item.text))
+  });
 
   let parsed;
 
   try {
-    parsed = parseGeminiJson(responseText, segments);
+    parsed = parseTranslationJson(responseText, segments);
   } catch (error) {
     log("warn", `JSON parse fallback: ${error.message}`);
     return segments.map((seg) => ({ index: seg.index, text: seg.originalText }));
@@ -238,7 +287,7 @@ async function translateChunk({ sourceLanguage, targetLanguage, segments, contex
     const text = typeof item.text === "string" ? item.text.trim() : "";
 
     if (text) {
-      resultMap.set(item.index, restorePlaceholders(text, segment.placeholders));
+      resultMap.set(item.index, finalizeSegmentTranslation(text, segment, targetLanguage));
     }
   }
 
@@ -300,11 +349,12 @@ function prepareSegmentsForTranslation(indexedSegments, protectedTerms, targetLa
 
 // ── Prompt Assembly ──
 
-function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, contextBefore, protectedTerms }) {
+function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, contextBefore, protectedTerms, extraRules }) {
   const sourceLanguageName = resolveLanguageName(sourceLanguage);
   const targetLanguageName = resolveLanguageName(targetLanguage);
   const promptRules = getPromptRulesForLanguage(targetLanguage);
   const template = getPromptTemplate();
+  const mergedRules = promptRules.concat(Array.isArray(extraRules) ? extraRules.filter(Boolean) : []);
 
   const payload = {
     source_language: sourceLanguageName,
@@ -321,23 +371,14 @@ function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, cont
       target_language: targetLanguageName
     }),
     template.rules_heading,
-    ...promptRules.map((rule, i) => `${i + 1}. ${rule}`),
+    ...mergedRules.map((rule, i) => `${i + 1}. ${rule}`),
     template.input_heading,
     JSON.stringify(payload)
   ].join("\n");
 }
 
 function buildPromptSegment(item) {
-  const payload = { index: item.index, text: item.text };
-
-  if (Array.isArray(item.placeholders) && item.placeholders.length) {
-    payload.placeholder_map = item.placeholders.map((entry) => ({
-      placeholder: entry.placeholder,
-      value: entry.value
-    }));
-  }
-
-  return payload;
+  return { index: item.index, text: item.text };
 }
 
 // ── Term Protection ──
@@ -357,7 +398,7 @@ function maskSegmentTerms(text, protectedTerms, segmentIndex, targetLanguage) {
       continue;
     }
 
-    const pattern = new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(term)}(?![A-Za-z0-9_])`, "gi");
+    const pattern = buildProtectedTermPattern(term);
 
     maskedText = maskedText.replace(pattern, (match) => {
       const placeholder = `__TERM_${segmentIndex}_${counter}__`;
@@ -388,8 +429,124 @@ function restorePlaceholders(text, placeholders) {
   return output;
 }
 
+function finalizeSegmentTranslation(text, segment, targetLanguage) {
+  const normalizedText = String(text || "").trim();
+
+  if (!normalizedText) {
+    return segment.originalText;
+  }
+
+  if (hasPlaceholderIntegrityViolation(normalizedText, segment.placeholders)) {
+    log("warn", `Placeholder integrity fallback on segment ${segment.index}`);
+    return segment.originalText;
+  }
+
+  if (isSuspiciousHybridTranslation(normalizedText, segment, targetLanguage)) {
+    log("warn", `Suspicious hybrid fallback on segment ${segment.index}`);
+    return segment.originalText;
+  }
+
+  return restorePlaceholders(normalizedText, segment.placeholders);
+}
+
+function shouldRetryTurkishSegment(segment, translatedText) {
+  if (!segment) {
+    return false;
+  }
+
+  const source = normalizeSegment(segment.originalText);
+  const target = normalizeSegment(translatedText);
+
+  if (!source || !target) {
+    return false;
+  }
+
+  if (source !== target) {
+    return false;
+  }
+
+  if (!/[A-Za-z]/.test(source)) {
+    return false;
+  }
+
+  if (/^[A-Za-z0-9_./:+-]+$/.test(source)) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasPlaceholderIntegrityViolation(text, placeholders) {
+  const expected = Array.isArray(placeholders) ? placeholders : [];
+
+  if (!expected.length) {
+    return false;
+  }
+
+  for (const item of expected) {
+    if (!text.includes(item.placeholder)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function isSuspiciousHybridTranslation(text, segment, targetLanguage) {
+  if (String(targetLanguage || "").toLowerCase() !== "tr") {
+    return false;
+  }
+
+  if (!segment) {
+    return false;
+  }
+
+  const normalized = normalizeDashes(String(text || ""));
+  const sourceNormalized = normalizeDashes(String(segment.originalText || ""));
+  const sourceHyphenTokens = new Set(extractHyphenatedProtectedTokens(sourceNormalized).map((item) => item.toLowerCase()));
+  const sourceWordSet = new Set((sourceNormalized.match(/\b[a-z0-9+#._]+\b/gi) || []).map((item) => item.toLowerCase()));
+  const targetHyphenTokens = extractHyphenatedProtectedTokens(normalized);
+
+  for (const token of targetHyphenTokens) {
+    const lowerToken = token.toLowerCase();
+
+    if (sourceHyphenTokens.has(lowerToken)) {
+      continue;
+    }
+
+    const parts = lowerToken.split("-").filter(Boolean);
+
+    if (parts.length >= 2 && parts.every((part) => sourceWordSet.has(part))) {
+      continue;
+    }
+
+    if (parts.length >= 2 && parts.every((part) => candidateTermSet.has(part) || sourceWordSet.has(part))) {
+      continue;
+    }
+
+    if (/^[a-z0-9+#._-]+$/i.test(token)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function escapeRegex(value) {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildProtectedTermPattern(term) {
+  const normalized = String(term || "").trim();
+
+  if (!normalized.includes(" ")) {
+    return new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(normalized)}(?![A-Za-z0-9_])`, "gi");
+  }
+
+  const parts = splitTermWords(normalized);
+  const joiner = "[\\s\\-\\u2010-\\u2015\\u2212\\uFE58\\uFE63\\uFF0D]+";
+  const body = parts.map((part) => escapeRegex(part)).join(joiner);
+  return new RegExp(`(?<![A-Za-z0-9_])${body}(?![A-Za-z0-9_])`, "gi");
 }
 
 function extractProtectedTerms(segments, targetLanguage) {
@@ -397,6 +554,10 @@ function extractProtectedTerms(segments, targetLanguage) {
   const tokenRegex = /\b[A-Za-z][A-Za-z0-9_./:+-]{1,40}\b/g;
 
   for (const segment of segments) {
+    for (const token of extractHyphenatedProtectedTokens(segment)) {
+      terms.add(token);
+    }
+
     tokenRegex.lastIndex = 0;
     let match;
 
@@ -406,7 +567,7 @@ function extractProtectedTerms(segments, targetLanguage) {
       }
     }
 
-    for (const phrase of extractPhraseCandidates(segment)) {
+    for (const phrase of extractPhraseCandidates(segment, targetLanguage)) {
       terms.add(phrase);
     }
   }
@@ -417,12 +578,24 @@ function extractProtectedTerms(segments, targetLanguage) {
     .slice(0, 400);
 }
 
+function extractHyphenatedProtectedTokens(segment) {
+  const normalized = normalizeDashes(String(segment || ""));
+  const matches = normalized.match(/\b[A-Za-z0-9+#._]+(?:-[A-Za-z0-9+#._]+)+\b/g);
+  return matches || [];
+}
+
 function shouldProtectToken(token, targetLanguage) {
   const lower = token.toLowerCase();
   const isTurkishTarget = String(targetLanguage || "").toLowerCase() === "tr";
 
   if (candidateTermSet.has(lower)) {
-    return true;
+    if (!isTurkishTarget) {
+      return true;
+    }
+
+    if (shouldProtectTurkishWordToken(token)) {
+      return true;
+    }
   }
 
   if (!isTurkishTarget) {
@@ -454,21 +627,83 @@ function shouldProtectToken(token, targetLanguage) {
   return false;
 }
 
-function extractPhraseCandidates(segment) {
-  const words = String(segment || "").toLowerCase().match(/[a-z0-9+#._-]+/g) || [];
+function shouldProtectTurkishWordToken(token) {
+  const value = String(token || "");
+
+  if (!value) {
+    return false;
+  }
+
+  if (/[0-9]/.test(value) || /[._/:+-]/.test(value)) {
+    return true;
+  }
+
+  if (/^[A-Z0-9_]+$/.test(value) && value.length <= 32) {
+    return true;
+  }
+
+  if (/[a-z][A-Z]/.test(value) || /[A-Z][a-z]+[A-Z]/.test(value)) {
+    return true;
+  }
+
+  return false;
+}
+
+function extractPhraseCandidates(segment, targetLanguage) {
+  if (String(targetLanguage || "").toLowerCase() === "tr") {
+    return [];
+  }
+
+  const words = tokenizePhraseText(segment);
   const phrases = new Set();
 
   for (let n = 2; n <= 4; n++) {
     for (let i = 0; i + n <= words.length; i++) {
-      const phrase = words.slice(i, i + n).join(" ");
+      const phraseWords = words.slice(i, i + n);
+      const phrase = phraseWords.join(" ");
 
-      if (candidatePhraseSet.has(phrase)) {
+      if (candidatePhraseSet.has(phrase) || isTechnicalPhraseCandidate(phraseWords)) {
         phrases.add(phrase);
       }
     }
   }
 
   return Array.from(phrases);
+}
+
+function isTechnicalPhraseCandidate(words) {
+  const normalizedWords = words
+    .map((word) => singularizeWord(String(word || "").trim().toLowerCase()))
+    .filter(Boolean);
+
+  if (normalizedWords.length < 2 || normalizedWords.length > 4) {
+    return false;
+  }
+
+  if (normalizedWords.some((word) => TECHNICAL_PHRASE_STOP_WORDS.has(word))) {
+    return false;
+  }
+
+  const knownCount = normalizedWords.filter((word) => candidateWordSet.has(word) || candidateTermSet.has(word)).length;
+
+  if (knownCount !== normalizedWords.length) {
+    return false;
+  }
+
+  const firstWord = normalizedWords[0];
+  const lastWord = normalizedWords[normalizedWords.length - 1];
+  const exactPhrase = normalizedWords.join(" ");
+  const headMatches = candidateHeadWordSet.has(lastWord) || candidateTermSet.has(lastWord);
+  const anchorMatches =
+    candidateTermSet.has(firstWord) ||
+    candidateTermSet.has(lastWord) ||
+    candidateHeadWordSet.has(lastWord);
+
+  if (candidatePhraseSet.has(exactPhrase)) {
+    return true;
+  }
+
+  return headMatches && anchorMatches;
 }
 
 // ── Prompt Rules ──
@@ -521,6 +756,15 @@ function applyPromptTemplate(template, variables) {
 // ── Bootstrap ──
 
 async function bootstrap() {
+  if (!bootstrapPromise) {
+    bootstrapPromise = initializeTranslatorCore();
+  }
+
+  await bootstrapPromise;
+  return getRuntimeInfo();
+}
+
+async function initializeTranslatorCore() {
   const [termsConfig, rulesConfig] = await Promise.all([
     loadTermsConfig(DEFAULT_TERMS_SOURCE),
     loadPromptRulesConfig(PROMPT_RULES_SOURCE)
@@ -529,17 +773,21 @@ async function bootstrap() {
   alwaysProtectTerms = normalizeTermList(termsConfig.always_protect || []);
   candidateTerms = normalizeTermList(termsConfig.candidate_terms || []);
   candidateTermSet = new Set(candidateTerms);
-  candidatePhraseSet = new Set(candidateTerms.filter((t) => t.includes(" ")));
+  candidatePhraseSet = buildCandidatePhraseSet(candidateTerms);
+  candidateWordSet = buildCandidateWordSet(candidateTerms);
+  candidateHeadWordSet = buildCandidateHeadWordSet(candidateTerms);
   termsSourceInfo = termsConfig.source || DEFAULT_TERMS_SOURCE;
   promptRulesConfig = rulesConfig;
   promptRulesInfo = rulesConfig.source || PROMPT_RULES_SOURCE;
+}
 
-  server.listen(PORT, "127.0.0.1", () => {
-    log("info", `Proxy ready at http://127.0.0.1:${PORT}`);
-    log("info", `Model: ${GEMINI_MODEL}`);
-    log("info", `Prompt rules: ${promptRulesInfo}`);
-    log("info", `Terms: ${termsSourceInfo} (${candidateTerms.length} candidates)`);
-  });
+function getRuntimeInfo() {
+  return {
+    defaultProvider: DEFAULT_PROVIDER,
+    defaultModels: { ...DEFAULT_PROVIDER_MODELS },
+    promptRules: promptRulesInfo,
+    termsSource: termsSourceInfo
+  };
 }
 
 async function loadTermsConfig(source) {
@@ -594,17 +842,13 @@ async function loadPromptRulesConfig(source) {
 }
 
 async function loadTextFromSource(source) {
-  if (/^https?:\/\//i.test(source)) {
-    const response = await fetch(source);
+  const response = await fetch(source);
 
-    if (!response.ok) {
-      throw new Error(`Failed to download remote file (HTTP ${response.status}).`);
-    }
-
-    return response.text();
+  if (!response.ok) {
+    throw new Error(`Failed to load bundled file (HTTP ${response.status}).`);
   }
 
-  return fs.readFileSync(path.resolve(source), "utf8");
+  return response.text();
 }
 
 // ── Normalization Helpers ──
@@ -614,7 +858,7 @@ function normalizeTermList(list) {
     new Set(
       (list || [])
         .map((term) =>
-          String(term || "")
+          normalizeDashes(String(term || ""))
             .trim()
             .toLowerCase()
             .replace(/[\u201C\u201D]/g, '"')
@@ -626,6 +870,106 @@ function normalizeTermList(list) {
         .filter((term) => term.length > 1 && term.length <= 80)
     )
   );
+}
+
+function buildCandidatePhraseSet(terms) {
+  const phrases = new Set();
+
+  for (const term of terms || []) {
+    if (!term || !term.includes(" ")) {
+      continue;
+    }
+
+    phrases.add(term);
+    phrases.add(singularizeLastWord(term));
+  }
+
+  return phrases;
+}
+
+function buildCandidateWordSet(terms) {
+  const words = new Set();
+
+  for (const term of terms || []) {
+    for (const word of splitTermWords(term)) {
+      if (word) {
+        words.add(word);
+        words.add(singularizeWord(word));
+      }
+    }
+  }
+
+  return words;
+}
+
+function buildCandidateHeadWordSet(terms) {
+  const heads = new Set();
+
+  for (const term of terms || []) {
+    const words = splitTermWords(term);
+
+    if (words.length < 2) {
+      continue;
+    }
+
+    const head = singularizeWord(words[words.length - 1]);
+
+    if (head) {
+      heads.add(head);
+    }
+  }
+
+  return heads;
+}
+
+function singularizeLastWord(phrase) {
+  const words = String(phrase || "").split(" ");
+
+  if (!words.length) {
+    return "";
+  }
+
+  words[words.length - 1] = singularizeWord(words[words.length - 1]);
+  return words.join(" ").trim();
+}
+
+function singularizeWord(word) {
+  const value = String(word || "");
+
+  if (value.length <= 3) {
+    return value;
+  }
+
+  if (value.endsWith("ies")) {
+    return value.slice(0, -3) + "y";
+  }
+
+  if (value.endsWith("es")) {
+    return value.slice(0, -2);
+  }
+
+  if (value.endsWith("s")) {
+    return value.slice(0, -1);
+  }
+
+  return value;
+}
+
+function splitTermWords(term) {
+  return normalizeDashes(String(term || ""), " ")
+    .toLowerCase()
+    .match(/[a-z0-9+#._-]+/g) || [];
+}
+
+function tokenizePhraseText(text) {
+  const tokens = normalizeDashes(String(text || ""), " ")
+    .replace(/-/g, " ")
+    .toLowerCase()
+    .match(/[a-z0-9+#._-]+/g) || [];
+
+  return tokens
+    .map((token) => token.replace(/^[._-]+|[._-]+$/g, ""))
+    .filter(Boolean);
 }
 
 function normalizePromptRuleList(list) {
@@ -702,12 +1046,31 @@ function normalizeLanguage(value, fallback) {
   return text || fallback;
 }
 
+function normalizeProvider(value) {
+  const provider = String(value || "").trim().toLowerCase();
+  return DEFAULT_PROVIDER_MODELS[provider] ? provider : DEFAULT_PROVIDER;
+}
+
+function resolveProviderModel(provider, requestedModel) {
+  const model = String(requestedModel || "").trim();
+  return model || DEFAULT_PROVIDER_MODELS[provider] || DEFAULT_PROVIDER_MODELS[DEFAULT_PROVIDER];
+}
+
+function resolveProviderApiKey(provider, requestedApiKey) {
+  const apiKey = String(requestedApiKey || "").trim();
+  return apiKey;
+}
+
 function normalizeSegment(value) {
   if (typeof value !== "string") {
     return "";
   }
 
-  return value.replace(/\s+/g, " ").trim();
+  return normalizeDashes(value).replace(/\s+/g, " ").trim();
+}
+
+function normalizeDashes(value, replacement = "-") {
+  return String(value || "").replace(UNICODE_DASH_REGEX, replacement);
 }
 
 // ── Token Estimation ──
@@ -750,23 +1113,198 @@ async function mapChunksWithConcurrency(chunks, concurrency, worker) {
   return results;
 }
 
-// ── Gemini API ──
+// ── Provider APIs ──
 
-async function callGeminiApi(action, body) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:${action}?key=${encodeURIComponent(GEMINI_API_KEY)}`;
+async function translatePromptWithProvider({ provider, model, apiKey, prompt, maxOutputTokens }) {
+  if (!apiKey) {
+    throw new Error(`No API key configured for provider "${provider}". Save one in the popup before translating.`);
+  }
 
-  return retry(async () => {
-    const response = await fetch(url, {
+  if (provider === "openai") {
+    const json = await callOpenAiApi(model, apiKey, buildOpenAiBody(prompt, maxOutputTokens));
+    return extractOpenAiResponseText(json);
+  }
+
+  if (provider === "anthropic") {
+    const json = await callAnthropicApi(model, apiKey, buildAnthropicBody(prompt, maxOutputTokens));
+    return extractAnthropicResponseText(json);
+  }
+
+  if (provider === "deepseek") {
+    const json = await callDeepSeekApi(model, apiKey, buildDeepSeekBody(prompt, maxOutputTokens));
+    return extractDeepSeekResponseText(json);
+  }
+
+  const json = await callGeminiApi(model, apiKey, "generateContent", buildGeminiBody(prompt));
+  return extractGeminiResponseText(json);
+}
+
+function buildGeminiBody(prompt) {
+  return {
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0,
+      responseMimeType: "application/json",
+      responseSchema: buildGeminiResponseSchema()
+    }
+  };
+}
+
+function buildOpenAiBody(prompt, maxOutputTokens) {
+  return {
+    input: prompt,
+    temperature: 0,
+    max_output_tokens: clampOutputTokens(maxOutputTokens),
+    text: {
+      format: {
+        type: "json_schema",
+        name: "subtitle_translations",
+        strict: true,
+        schema: buildJsonSchemaResponse()
+      }
+    }
+  };
+}
+
+function buildAnthropicBody(prompt, maxOutputTokens) {
+  return {
+    system: "Return valid JSON only. Follow the user's requested schema exactly.",
+    max_tokens: clampOutputTokens(maxOutputTokens),
+    temperature: 0,
+    messages: [{ role: "user", content: prompt }]
+  };
+}
+
+function buildDeepSeekBody(prompt, maxOutputTokens) {
+  return {
+    messages: [
+      {
+        role: "system",
+        content: "Return valid JSON only. Follow the user's requested schema exactly."
+      },
+      {
+        role: "user",
+        content: prompt
+      }
+    ],
+    temperature: 0,
+    max_tokens: clampOutputTokens(maxOutputTokens),
+    response_format: {
+      type: "json_object"
+    },
+    stream: false
+  };
+}
+
+function buildGeminiResponseSchema() {
+  return {
+    type: "OBJECT",
+    required: ["translations"],
+    properties: {
+      translations: {
+        type: "ARRAY",
+        items: {
+          type: "OBJECT",
+          required: ["index", "text"],
+          properties: {
+            index: { type: "INTEGER" },
+            text: { type: "STRING" }
+          }
+        }
+      }
+    }
+  };
+}
+
+function buildJsonSchemaResponse() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["translations"],
+    properties: {
+      translations: {
+        type: "array",
+        items: {
+          type: "object",
+          additionalProperties: false,
+          required: ["index", "text"],
+          properties: {
+            index: { type: "integer" },
+            text: { type: "string" }
+          }
+        }
+      }
+    }
+  };
+}
+
+function clampOutputTokens(value) {
+  return Math.max(256, Math.min(Math.ceil(Number(value) || 256), 4096));
+}
+
+async function callGeminiApi(model, apiKey, action, body) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:${action}?key=${encodeURIComponent(apiKey)}`;
+  return callJsonApi(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, "Gemini");
+}
+
+async function callOpenAiApi(model, apiKey, body) {
+  const payload = { ...body, model };
+  return callJsonApi(
+    "https://api.openai.com/v1/responses",
+    {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload)
+    },
+    "OpenAI"
+  );
+}
+
+async function callAnthropicApi(model, apiKey, body) {
+  const payload = { ...body, model };
+  return callJsonApi(
+    "https://api.anthropic.com/v1/messages",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify(payload)
+    },
+    "Anthropic"
+  );
+}
+
+async function callDeepSeekApi(model, apiKey, body) {
+  const payload = { ...body, model };
+  return callJsonApi(
+    "https://api.deepseek.com/chat/completions",
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(payload)
+    },
+    "DeepSeek"
+  );
+}
+
+async function callJsonApi(url, options, providerLabel) {
+  return retry(async () => {
+    const response = await fetch(url, options);
 
     if (!response.ok) {
       const text = await response.text();
       const status = response.status;
       const retryable = status === 429 || status >= 500;
-      const error = new Error(`Gemini API error (${status}): ${trimForLog(text)}`);
+      const error = new Error(`${providerLabel} API error (${status}): ${trimForLog(text)}`);
       error.retryable = retryable;
       throw error;
     }
@@ -775,7 +1313,7 @@ async function callGeminiApi(action, body) {
   }, 3);
 }
 
-function extractResponseText(responseJson) {
+function extractGeminiResponseText(responseJson) {
   const candidates = responseJson && responseJson.candidates;
 
   if (!Array.isArray(candidates) || !candidates.length) {
@@ -791,9 +1329,64 @@ function extractResponseText(responseJson) {
   return parts.map((part) => part.text || "").join("\n").trim();
 }
 
+function extractOpenAiResponseText(responseJson) {
+  if (typeof responseJson.output_text === "string" && responseJson.output_text.trim()) {
+    return responseJson.output_text.trim();
+  }
+
+  const outputs = Array.isArray(responseJson && responseJson.output) ? responseJson.output : [];
+  const chunks = [];
+
+  for (const item of outputs) {
+    const content = Array.isArray(item && item.content) ? item.content : [];
+
+    for (const entry of content) {
+      if (typeof entry.text === "string" && entry.text.trim()) {
+        chunks.push(entry.text.trim());
+      }
+    }
+  }
+
+  if (!chunks.length) {
+    throw new Error("OpenAI response text is empty.");
+  }
+
+  return chunks.join("\n").trim();
+}
+
+function extractAnthropicResponseText(responseJson) {
+  const content = Array.isArray(responseJson && responseJson.content) ? responseJson.content : [];
+  const chunks = content
+    .map((item) => (item && item.type === "text" && typeof item.text === "string" ? item.text.trim() : ""))
+    .filter(Boolean);
+
+  if (!chunks.length) {
+    throw new Error("Anthropic response text is empty.");
+  }
+
+  return chunks.join("\n").trim();
+}
+
+function extractDeepSeekResponseText(responseJson) {
+  const choices = Array.isArray(responseJson && responseJson.choices) ? responseJson.choices : [];
+
+  if (!choices.length) {
+    throw new Error("DeepSeek response choices are empty.");
+  }
+
+  const message = choices[0] && choices[0].message;
+  const content = typeof (message && message.content) === "string" ? message.content.trim() : "";
+
+  if (!content) {
+    throw new Error("DeepSeek response text is empty.");
+  }
+
+  return content;
+}
+
 // ── Response Parsing ──
 
-function parseGeminiJson(text, segments) {
+function parseTranslationJson(text, segments) {
   const input = String(text || "").trim();
 
   const fromJson = tryParseJsonCandidates(input, segments);
@@ -1082,6 +1675,10 @@ function sleep(ms) {
 }
 
 function log(level, message) {
+  if (level === "info") {
+    return;
+  }
+
   const timestamp = new Date().toISOString();
   const prefix = `[${timestamp}] [${level.toUpperCase()}]`;
   const output = `${prefix} ${message}`;
@@ -1100,46 +1697,13 @@ function trimForLog(text) {
   return normalized.length > 220 ? normalized.slice(0, 220) + "..." : normalized;
 }
 
-// ── HTTP Helpers ──
+const TranslatorCore = {
+  initialize: bootstrap,
+  translateRequest,
+  getRuntimeInfo
+};
 
-function setCorsHeaders(res) {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+if (typeof globalThis !== "undefined") {
+  globalThis.TranslatorCore = TranslatorCore;
 }
-
-function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "Content-Type": "application/json; charset=utf-8" });
-  res.end(JSON.stringify(payload));
-}
-
-function readJsonBody(req) {
-  return new Promise((resolve, reject) => {
-    let raw = "";
-
-    req.on("data", (chunk) => {
-      raw += chunk;
-
-      if (raw.length > 5 * 1024 * 1024) {
-        reject(new Error("Request body is too large."));
-      }
-    });
-
-    req.on("end", () => {
-      if (!raw.trim()) {
-        resolve({});
-        return;
-      }
-
-      try {
-        resolve(JSON.parse(raw));
-      } catch (_) {
-        reject(new Error("Failed to parse JSON body."));
-      }
-    });
-
-    req.on("error", () => {
-      reject(new Error("Failed while reading request body."));
-    });
-  });
-}
+})();

@@ -22,6 +22,22 @@
         <label for="languageSelect">Target language</label>
         <select id="languageSelect" aria-label="Select target language"></select>
 
+        <label for="providerSelect">AI provider</label>
+        <select id="providerSelect" aria-label="Select AI provider"></select>
+
+        <label for="modelSelect">Model</label>
+        <select id="modelSelect" aria-label="Select model"></select>
+        <input id="customModelInput" type="text" spellcheck="false" aria-label="Custom model name" hidden />
+
+        <label for="apiKeyInput">API key</label>
+        <input id="apiKeyInput" type="password" spellcheck="false" autocomplete="off" aria-label="Provider API key" />
+        <p class="field-hint" id="apiKeyHint"></p>
+        <p class="field-note">Stored only in your local Chrome profile. Not sent anywhere except your selected AI provider.</p>
+
+        <button id="saveSettingsButton" type="button" class="secondary-button">
+          <span>Save Provider Settings</span>
+        </button>
+
         <button id="translateButton" type="button">
           <span id="buttonLabel">Translate Subtitles</span>
         </button>
@@ -34,11 +50,15 @@
         </div>
 
         <p id="statusText" class="status" role="status" aria-live="polite"></p>
+        <a
+          class="source-link"
+          href="https://github.com/ugurkurt26/Coursera-Subtitle-AI-Translator"
+          target="_blank"
+          rel="noreferrer"
+        >
+          Source code
+        </a>
       </div>
-
-      <footer class="popup-footer">
-        <span>Powered by Gemini AI</span>
-      </footer>
     </main>
 
     <script src="popup.js"></script>

@@ -16,7 +16,7 @@ body {
 }
 
 .popup {
-  width: 300px;
+  width: 320px;
   display: flex;
   flex-direction: column;
 }
@@ -60,6 +60,7 @@ label {
 }
 
 select {
+  display: block;
   width: 100%;
   padding: 8px 10px;
   border: 1px solid #cbd5e1;
@@ -77,10 +78,43 @@ select {
   transition: border-color 0.15s, box-shadow 0.15s;
 }
 
-select:focus {
+input {
+  display: block;
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #fff;
+  color: #1e293b;
+  font-size: 13px;
+  font-family: inherit;
+  margin-bottom: 8px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+input[hidden] {
+  display: none;
+}
+
+select:focus,
+input:focus {
   outline: none;
   border-color: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+}
+
+.field-hint {
+  margin: -2px 0 12px;
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.35;
+}
+
+.field-note {
+  margin: -6px 0 12px;
+  font-size: 11px;
+  color: #475569;
+  line-height: 1.35;
 }
 
 button {
@@ -116,6 +150,19 @@ button:disabled {
 button.applied {
   background: linear-gradient(135deg, #10b981, #059669);
   cursor: default;
+}
+
+.secondary-button {
+  margin-bottom: 10px;
+  background: #fff;
+  color: #1e293b;
+  border: 1px solid #cbd5e1;
+  box-shadow: none;
+}
+
+.secondary-button:hover:not(:disabled) {
+  opacity: 1;
+  box-shadow: 0 2px 6px rgba(15, 23, 42, 0.08);
 }
 
 /* ── Progress ── */
@@ -178,13 +225,15 @@ button.applied {
   color: #16a34a;
 }
 
-/* ── Footer ── */
+.source-link {
+  display: inline-block;
+  margin-top: 10px;
+  font-size: 11px;
+  color: #64748b;
+  text-decoration: none;
+}
 
-.popup-footer {
-  padding: 8px 16px;
-  border-top: 1px solid #e2e8f0;
-  text-align: center;
-  font-size: 10px;
-  color: #94a3b8;
-  letter-spacing: 0.02em;
+.source-link:hover {
+  color: #2563eb;
+  text-decoration: underline;
 }
