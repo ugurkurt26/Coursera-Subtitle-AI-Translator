@@ -76,8 +76,10 @@ You should see:
 
 1. Open any Coursera video lecture page.
 2. Make sure the **Downloads** section is visible on the page (it contains the VTT subtitle link).
-3. Click the extension icon and select your target language.
-4. Click **Translate Subtitles**.
+3. In the Coursera video player's subtitle menu, make sure **Subtitles off** is selected.
+4. Click the extension icon, select your target language, and click **Translate Subtitles**.
+
+> Important: If Coursera's built-in subtitles are set to any language instead of **Subtitles off**, the extension's translated subtitles will not appear.
 
 ## Configuration
 
@@ -134,7 +136,7 @@ This means a thought like *"In this video, we're going to be talking about an in
 | "VTT subtitle download link not found" | Downloads section not rendered | Scroll down on the video page to load the Downloads section |
 | "Failed to communicate with the extension" | Content script not injected | Refresh the Coursera page and try again |
 | "Gemini proxy did not return a valid response" | Proxy not running or model error | Check terminal for proxy logs, verify `GEMINI_API_KEY` |
-| Subtitles unchanged after translation | TextTrack mismatch | Ensure the video has English subtitles enabled |
+| Subtitles unchanged after translation | Coursera's native subtitle track is enabled and overrides the translated track | In the player subtitle menu, select **Subtitles off**, then run translation again |
 
 ## License
 
