@@ -25,6 +25,13 @@ Translate Coursera subtitles with Gemini, ChatGPT, Claude, or DeepSeek.
   - Anthropic
   - DeepSeek
 
+## API Key Links
+
+- Gemini: [Google AI Studio API key page](https://aistudio.google.com/apikey)
+- ChatGPT: [OpenAI API keys](https://platform.openai.com/api-keys)
+- Anthropic: [Claude Platform API keys](https://platform.claude.com/settings/keys)
+- DeepSeek: [DeepSeek API keys](https://platform.deepseek.com/api_keys)
+
 ## Install
 
 1. Open `chrome://extensions`
