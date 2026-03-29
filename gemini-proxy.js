@@ -2,6 +2,8 @@ const fs = require("fs");
 const http = require("http");
 const path = require("path");
 
+// ── Configuration ──
+
 const PORT = Number(process.env.GEMINI_PROXY_PORT || 8787);
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
@@ -17,8 +19,12 @@ const PARALLEL_CHUNK_CONCURRENCY = Number(process.env.PARALLEL_CHUNK_CONCURRENCY
 const SINGLE_REQUEST_INPUT_BUDGET = Number(process.env.SINGLE_REQUEST_INPUT_BUDGET || 1800);
 const SINGLE_REQUEST_OUTPUT_BUDGET = Number(process.env.SINGLE_REQUEST_OUTPUT_BUDGET || 1200);
 const SINGLE_REQUEST_SEGMENT_BUDGET = Number(process.env.SINGLE_REQUEST_SEGMENT_BUDGET || 25);
+
 const DEFAULT_TERMS_SOURCE = path.join(__dirname, "tech_terms_dictionary.json");
 const DEFAULT_PROMPT_RULES_SOURCE = path.join(__dirname, "prompt-rules.json");
+const PROMPT_RULES_SOURCE = process.env.PROMPT_RULES_SOURCE || DEFAULT_PROMPT_RULES_SOURCE;
+
+// ── Language Map ──
 
 const LANGUAGE_MAP = {
   auto: "Auto-detected source language",
@@ -37,18 +43,21 @@ const LANGUAGE_MAP = {
   hi: "Hindi",
   id: "Indonesian"
 };
-const PROMPT_RULES_SOURCE = process.env.PROMPT_RULES_SOURCE || DEFAULT_PROMPT_RULES_SOURCE;
 
-let TERMS_SOURCE_INFO = DEFAULT_TERMS_SOURCE;
-let PROMPT_RULES_INFO = PROMPT_RULES_SOURCE;
-let ALWAYS_PROTECT_TERMS = [];
-let CANDIDATE_TERMS = [];
-let CANDIDATE_TERM_SET = new Set();
-let CANDIDATE_PHRASE_SET = new Set();
-let PROMPT_RULES_CONFIG = null;
+// ── Runtime State ──
+
+let termsSourceInfo = DEFAULT_TERMS_SOURCE;
+let promptRulesInfo = PROMPT_RULES_SOURCE;
+let alwaysProtectTerms = [];
+let candidateTerms = [];
+let candidateTermSet = new Set();
+let candidatePhraseSet = new Set();
+let promptRulesConfig = null;
+
+// ── Entry Point ──
 
 if (!GEMINI_API_KEY) {
-  console.error("GEMINI_API_KEY is missing. Define it in your environment first.");
+  console.error("[FATAL] GEMINI_API_KEY is missing. Export it before starting the proxy.");
   process.exit(1);
 }
 
@@ -72,6 +81,7 @@ const server = http.createServer(async (req, res) => {
       const response = await translateRequest(body);
       sendJson(res, 200, response);
     } catch (error) {
+      log("error", `Translation failed: ${error.message}`);
       sendJson(res, 400, { ok: false, error: error.message });
     }
     return;
@@ -81,12 +91,15 @@ const server = http.createServer(async (req, res) => {
 });
 
 bootstrap().catch((error) => {
-  console.error(`Proxy failed to start: ${error.message}`);
+  console.error(`[FATAL] Proxy failed to start: ${error.message}`);
   process.exit(1);
 });
 
+// ── Translation Pipeline ──
+
 async function translateRequest(payload) {
   const segments = Array.isArray(payload && payload.segments) ? payload.segments : [];
+
   if (!segments.length) {
     throw new Error("segments array cannot be empty.");
   }
@@ -110,12 +123,15 @@ async function translateRequest(payload) {
 
   const inputTokenCount = estimateInputTokens(fullPrompt);
   const estimatedOutputTokens = estimateOutputTokens(cleanedSegments);
+
   const shouldUseSingleRequest =
     inputTokenCount <= Math.min(SINGLE_REQUEST_INPUT_BUDGET, FULL_INPUT_SAFE_LIMIT) &&
     estimatedOutputTokens <= Math.min(SINGLE_REQUEST_OUTPUT_BUDGET, FULL_OUTPUT_SAFE_LIMIT) &&
     preparedSegments.length <= SINGLE_REQUEST_SEGMENT_BUDGET;
 
   if (shouldUseSingleRequest) {
+    log("info", `Single-request mode (${preparedSegments.length} segments, ~${inputTokenCount} input tokens)`);
+
     const translated = await translateChunk({
       sourceLanguage,
       targetLanguage,
@@ -128,43 +144,30 @@ async function translateRequest(payload) {
       ok: true,
       mode: "single",
       translations: toOrderedTranslations(indexedSegments, translated),
-      tokenInfo: {
-        inputTokenCount,
-        estimatedOutputTokens,
-        chunkCount: 1
-      }
+      tokenInfo: { inputTokenCount, estimatedOutputTokens, chunkCount: 1 }
     };
   }
 
   const chunks = splitByCharacterBudget(preparedSegments, CHUNK_CHAR_LIMIT);
+  const parallelism = Math.max(1, Math.min(PARALLEL_CHUNK_CONCURRENCY, chunks.length));
+
+  log("info", `Chunked mode (${chunks.length} chunks, concurrency: ${parallelism})`);
+
   const translatedChunks = await mapChunksWithConcurrency(
     chunks,
-    Math.max(1, PARALLEL_CHUNK_CONCURRENCY),
+    parallelism,
     async (chunk) => {
       const contextStart = Math.max(0, chunk[0].index - CHUNK_CONTEXT_WINDOW);
       const contextBefore = preparedSegments.slice(contextStart, chunk[0].index);
-      return translateChunk({
-        sourceLanguage,
-        targetLanguage,
-        segments: chunk,
-        contextBefore,
-        promptTerms
-      });
+      return translateChunk({ sourceLanguage, targetLanguage, segments: chunk, contextBefore, promptTerms });
     }
   );
-
-  const mergedTranslations = translatedChunks.flat();
 
   return {
     ok: true,
     mode: "chunked",
-    translations: toOrderedTranslations(indexedSegments, mergedTranslations),
-    tokenInfo: {
-      inputTokenCount,
-      estimatedOutputTokens,
-      chunkCount: chunks.length,
-      parallelism: Math.max(1, Math.min(PARALLEL_CHUNK_CONCURRENCY, chunks.length))
-    }
+    translations: toOrderedTranslations(indexedSegments, translatedChunks.flat()),
+    tokenInfo: { inputTokenCount, estimatedOutputTokens, chunkCount: chunks.length, parallelism }
   };
 }
 
@@ -178,12 +181,7 @@ async function translateChunk({ sourceLanguage, targetLanguage, segments, contex
   });
 
   const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: prompt }]
-      }
-    ],
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0,
       responseMimeType: "application/json",
@@ -209,47 +207,48 @@ async function translateChunk({ sourceLanguage, targetLanguage, segments, contex
 
   const json = await callGeminiApi("generateContent", body);
   const responseText = extractResponseText(json);
+
   let parsed;
+
   try {
     parsed = parseGeminiJson(responseText, segments);
   } catch (error) {
-    console.warn(`JSON parse fallback enabled: ${error.message}`);
-    return segments.map((segment) => ({
-      index: segment.index,
-      text: segment.originalText
-    }));
+    log("warn", `JSON parse fallback: ${error.message}`);
+    return segments.map((seg) => ({ index: seg.index, text: seg.originalText }));
   }
 
   if (!parsed || !Array.isArray(parsed.translations)) {
-    return segments.map((segment) => ({
-      index: segment.index,
-      text: segment.originalText
-    }));
+    return segments.map((seg) => ({ index: seg.index, text: seg.originalText }));
   }
 
-  const segmentMap = new Map(segments.map((segment) => [segment.index, segment]));
-  const map = new Map();
+  const segmentMap = new Map(segments.map((seg) => [seg.index, seg]));
+  const resultMap = new Map();
+
   for (const item of parsed.translations) {
     if (!item || typeof item.index !== "number") {
       continue;
     }
 
     const segment = segmentMap.get(item.index);
+
     if (!segment) {
       continue;
     }
 
     const text = typeof item.text === "string" ? item.text.trim() : "";
+
     if (text) {
-      map.set(item.index, restorePlaceholders(text, segment.placeholders));
+      resultMap.set(item.index, restorePlaceholders(text, segment.placeholders));
     }
   }
 
-  return segments.map((segment) => ({
-    index: segment.index,
-    text: map.get(segment.index) || segment.originalText
+  return segments.map((seg) => ({
+    index: seg.index,
+    text: resultMap.get(seg.index) || seg.originalText
   }));
 }
+
+// ── Segment Preparation ──
 
 function toOrderedTranslations(originalSegments, translatedSegments) {
   const map = new Map();
@@ -258,7 +257,7 @@ function toOrderedTranslations(originalSegments, translatedSegments) {
     map.set(item.index, item.text);
   }
 
-  return originalSegments.map((segment) => map.get(segment.index) || segment.text);
+  return originalSegments.map((seg) => map.get(seg.index) || seg.text);
 }
 
 function splitByCharacterBudget(indexedSegments, charLimit) {
@@ -286,11 +285,26 @@ function splitByCharacterBudget(indexedSegments, charLimit) {
   return chunks;
 }
 
+function prepareSegmentsForTranslation(indexedSegments, protectedTerms, targetLanguage) {
+  return indexedSegments.map((segment) => {
+    const masked = maskSegmentTerms(segment.text, protectedTerms, segment.index, targetLanguage);
+
+    return {
+      index: segment.index,
+      text: masked.text,
+      originalText: segment.text,
+      placeholders: masked.placeholders
+    };
+  });
+}
+
+// ── Prompt Assembly ──
+
 function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, contextBefore, protectedTerms }) {
   const sourceLanguageName = resolveLanguageName(sourceLanguage);
   const targetLanguageName = resolveLanguageName(targetLanguage);
   const promptRules = getPromptRulesForLanguage(targetLanguage);
-  const promptTemplate = getPromptTemplate();
+  const template = getPromptTemplate();
 
   const payload = {
     source_language: sourceLanguageName,
@@ -301,23 +315,20 @@ function buildTranslationPrompt({ sourceLanguage, targetLanguage, segments, cont
   };
 
   return [
-    promptTemplate.role_line,
-    applyPromptTemplate(promptTemplate.translate_line_template, {
+    template.role_line,
+    applyPromptTemplate(template.translate_line_template, {
       source_language: sourceLanguageName,
       target_language: targetLanguageName
     }),
-    promptTemplate.rules_heading,
-    ...promptRules.map((rule, index) => `${index + 1}. ${rule}`),
-    promptTemplate.input_heading,
+    template.rules_heading,
+    ...promptRules.map((rule, i) => `${i + 1}. ${rule}`),
+    template.input_heading,
     JSON.stringify(payload)
   ].join("\n");
 }
 
 function buildPromptSegment(item) {
-  const payload = {
-    index: item.index,
-    text: item.text
-  };
+  const payload = { index: item.index, text: item.text };
 
   if (Array.isArray(item.placeholders) && item.placeholders.length) {
     payload.placeholder_map = item.placeholders.map((entry) => ({
@@ -329,17 +340,7 @@ function buildPromptSegment(item) {
   return payload;
 }
 
-function prepareSegmentsForTranslation(indexedSegments, protectedTerms, targetLanguage) {
-  return indexedSegments.map((segment) => {
-    const masked = maskSegmentTerms(segment.text, protectedTerms, segment.index, targetLanguage);
-    return {
-      index: segment.index,
-      text: masked.text,
-      originalText: segment.text,
-      placeholders: masked.placeholders
-    };
-  });
-}
+// ── Term Protection ──
 
 function maskSegmentTerms(text, protectedTerms, segmentIndex, targetLanguage) {
   let maskedText = text;
@@ -357,6 +358,7 @@ function maskSegmentTerms(text, protectedTerms, segmentIndex, targetLanguage) {
     }
 
     const pattern = new RegExp(`(?<![A-Za-z0-9_])${escapeRegex(term)}(?![A-Za-z0-9_])`, "gi");
+
     maskedText = maskedText.replace(pattern, (match) => {
       const placeholder = `__TERM_${segmentIndex}_${counter}__`;
       counter += 1;
@@ -373,26 +375,16 @@ function shouldMaskTermForLanguage(term, targetLanguage) {
     return true;
   }
 
-  if (term.includes(" ")) {
-    return true;
-  }
-
-  if (/[0-9]/.test(term)) {
-    return true;
-  }
-
-  if (/[._/:+-]/.test(term)) {
-    return true;
-  }
-
-  return false;
+  return term.includes(" ") || /[0-9]/.test(term) || /[._/:+-]/.test(term);
 }
 
 function restorePlaceholders(text, placeholders) {
   let output = text;
+
   for (const item of placeholders || []) {
     output = output.split(item.placeholder).join(item.value);
   }
+
   return output;
 }
 
@@ -401,16 +393,16 @@ function escapeRegex(value) {
 }
 
 function extractProtectedTerms(segments, targetLanguage) {
-  const terms = new Set(ALWAYS_PROTECT_TERMS);
+  const terms = new Set(alwaysProtectTerms);
   const tokenRegex = /\b[A-Za-z][A-Za-z0-9_./:+-]{1,40}\b/g;
 
   for (const segment of segments) {
     tokenRegex.lastIndex = 0;
     let match;
+
     while ((match = tokenRegex.exec(segment)) !== null) {
-      const token = match[0];
-      if (shouldProtectToken(token, targetLanguage)) {
-        terms.add(token);
+      if (shouldProtectToken(match[0], targetLanguage)) {
+        terms.add(match[0]);
       }
     }
 
@@ -429,20 +421,20 @@ function shouldProtectToken(token, targetLanguage) {
   const lower = token.toLowerCase();
   const isTurkishTarget = String(targetLanguage || "").toLowerCase() === "tr";
 
-  if (CANDIDATE_TERM_SET.has(lower)) {
+  if (candidateTermSet.has(lower)) {
     return true;
   }
 
   if (!isTurkishTarget) {
-    if (lower.endsWith("ies") && CANDIDATE_TERM_SET.has(lower.slice(0, -3) + "y")) {
+    if (lower.endsWith("ies") && candidateTermSet.has(lower.slice(0, -3) + "y")) {
       return true;
     }
 
-    if (lower.endsWith("es") && CANDIDATE_TERM_SET.has(lower.slice(0, -2))) {
+    if (lower.endsWith("es") && candidateTermSet.has(lower.slice(0, -2))) {
       return true;
     }
 
-    if (lower.endsWith("s") && CANDIDATE_TERM_SET.has(lower.slice(0, -1))) {
+    if (lower.endsWith("s") && candidateTermSet.has(lower.slice(0, -1))) {
       return true;
     }
   }
@@ -469,7 +461,8 @@ function extractPhraseCandidates(segment) {
   for (let n = 2; n <= 4; n++) {
     for (let i = 0; i + n <= words.length; i++) {
       const phrase = words.slice(i, i + n).join(" ");
-      if (CANDIDATE_PHRASE_SET.has(phrase)) {
+
+      if (candidatePhraseSet.has(phrase)) {
         phrases.add(phrase);
       }
     }
@@ -478,24 +471,74 @@ function extractPhraseCandidates(segment) {
   return Array.from(phrases);
 }
 
+// ── Prompt Rules ──
+
+function getPromptRulesForLanguage(targetLanguage) {
+  const code = String(targetLanguage || "").toLowerCase();
+  const config = promptRulesConfig || {};
+  const commonRules = Array.isArray(config.common_rules) ? config.common_rules : [];
+  const languageRules = config.language_rules && typeof config.language_rules === "object" ? config.language_rules : {};
+  const defaultRules = languageRules.default || {};
+  const specificRules = languageRules[code] || {};
+  const merged = [...commonRules];
+
+  const styleRule = specificRules.style_rule || defaultRules.style_rule;
+
+  if (styleRule) {
+    merged.push(styleRule);
+  }
+
+  const extraRules = [...(defaultRules.extra_rules || []), ...(specificRules.extra_rules || [])];
+
+  for (const rule of extraRules) {
+    const normalized = normalizePromptRuleLine(rule);
+
+    if (normalized) {
+      merged.push(normalized);
+    }
+  }
+
+  return Array.from(new Set(merged));
+}
+
+function getPromptTemplate() {
+  const template = promptRulesConfig && promptRulesConfig.prompt_template;
+
+  if (!template) {
+    throw new Error("Prompt template is not loaded.");
+  }
+
+  return template;
+}
+
+function applyPromptTemplate(template, variables) {
+  return String(template || "").replace(/\{\{([a-z_]+)\}\}/gi, (fullMatch, key) => {
+    const value = variables && Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : fullMatch;
+    return String(value || "");
+  });
+}
+
+// ── Bootstrap ──
+
 async function bootstrap() {
-  const [termsConfig, promptRulesConfig] = await Promise.all([
+  const [termsConfig, rulesConfig] = await Promise.all([
     loadTermsConfig(DEFAULT_TERMS_SOURCE),
     loadPromptRulesConfig(PROMPT_RULES_SOURCE)
   ]);
-  ALWAYS_PROTECT_TERMS = normalizeTermList(termsConfig.always_protect || []);
-  CANDIDATE_TERMS = normalizeTermList(termsConfig.candidate_terms || []);
-  CANDIDATE_TERM_SET = new Set(CANDIDATE_TERMS);
-  CANDIDATE_PHRASE_SET = new Set(CANDIDATE_TERMS.filter((term) => term.includes(" ")));
-  TERMS_SOURCE_INFO = termsConfig.source || DEFAULT_TERMS_SOURCE;
-  PROMPT_RULES_CONFIG = promptRulesConfig;
-  PROMPT_RULES_INFO = promptRulesConfig.source || PROMPT_RULES_SOURCE;
+
+  alwaysProtectTerms = normalizeTermList(termsConfig.always_protect || []);
+  candidateTerms = normalizeTermList(termsConfig.candidate_terms || []);
+  candidateTermSet = new Set(candidateTerms);
+  candidatePhraseSet = new Set(candidateTerms.filter((t) => t.includes(" ")));
+  termsSourceInfo = termsConfig.source || DEFAULT_TERMS_SOURCE;
+  promptRulesConfig = rulesConfig;
+  promptRulesInfo = rulesConfig.source || PROMPT_RULES_SOURCE;
 
   server.listen(PORT, "127.0.0.1", () => {
-    console.log(`Gemini proxy ready: http://127.0.0.1:${PORT}`);
-    console.log(`Model: ${GEMINI_MODEL}`);
-    console.log(`Prompt rules source: ${PROMPT_RULES_INFO}`);
-    console.log(`Terms source: ${TERMS_SOURCE_INFO} (candidates: ${CANDIDATE_TERMS.length})`);
+    log("info", `Proxy ready at http://127.0.0.1:${PORT}`);
+    log("info", `Model: ${GEMINI_MODEL}`);
+    log("info", `Prompt rules: ${promptRulesInfo}`);
+    log("info", `Terms: ${termsSourceInfo} (${candidateTerms.length} candidates)`);
   });
 }
 
@@ -512,15 +555,15 @@ async function loadTermsConfig(source) {
   }
 
   if (parsed && Array.isArray(parsed.terms)) {
-    const candidateTerms = parsed.terms
+    const terms = parsed.terms
       .map((item) => (item && typeof item.en === "string" ? item.en : ""))
       .filter(Boolean);
-    const metadata = parsed.metadata || {};
-    const version = metadata.version ? ` v${metadata.version}` : "";
+    const version = parsed.metadata && parsed.metadata.version ? ` v${parsed.metadata.version}` : "";
+
     return {
       source: `${source}${version}`,
       always_protect: [],
-      candidate_terms: candidateTerms
+      candidate_terms: terms
     };
   }
 
@@ -530,42 +573,41 @@ async function loadTermsConfig(source) {
 async function loadPromptRulesConfig(source) {
   const raw = await loadTextFromSource(source);
   const parsed = JSON.parse(raw);
+
   const promptTemplate = normalizePromptTemplate(parsed && parsed.prompt_template);
   const commonRules = normalizePromptRuleList(parsed && parsed.common_rules);
   const languageRules = normalizePromptLanguageRules(parsed && parsed.language_rules);
 
   if (!promptTemplate) {
-    throw new Error("Invalid prompt rules file: prompt_template is missing or incomplete.");
+    throw new Error("Invalid prompt rules: prompt_template is missing or incomplete.");
   }
 
   if (!commonRules.length) {
-    throw new Error("Invalid prompt rules file: common_rules is empty.");
+    throw new Error("Invalid prompt rules: common_rules is empty.");
   }
 
   if (!languageRules.default || !languageRules.default.style_rule) {
-    throw new Error("Invalid prompt rules file: language_rules.default.style_rule is required.");
+    throw new Error("Invalid prompt rules: language_rules.default.style_rule is required.");
   }
 
-  return {
-    source,
-    prompt_template: promptTemplate,
-    common_rules: commonRules,
-    language_rules: languageRules
-  };
+  return { source, prompt_template: promptTemplate, common_rules: commonRules, language_rules: languageRules };
 }
 
 async function loadTextFromSource(source) {
   if (/^https?:\/\//i.test(source)) {
     const response = await fetch(source);
+
     if (!response.ok) {
-      throw new Error(`Failed to download remote terms file (HTTP ${response.status}).`);
+      throw new Error(`Failed to download remote file (HTTP ${response.status}).`);
     }
+
     return response.text();
   }
 
-  const resolved = path.resolve(source);
-  return fs.readFileSync(resolved, "utf8");
+  return fs.readFileSync(path.resolve(source), "utf8");
 }
+
+// ── Normalization Helpers ──
 
 function normalizeTermList(list) {
   return Array.from(
@@ -575,8 +617,8 @@ function normalizeTermList(list) {
           String(term || "")
             .trim()
             .toLowerCase()
-            .replace(/[“”]/g, '"')
-            .replace(/[‘’]/g, "'")
+            .replace(/[\u201C\u201D]/g, '"')
+            .replace(/[\u2018\u2019]/g, "'")
             .replace(/^[\s"'`]+/, "")
             .replace(/[\s"'`]+$/, "")
             .replace(/\s+/g, " ")
@@ -591,9 +633,7 @@ function normalizePromptRuleList(list) {
     return [];
   }
 
-  return list
-    .map((rule) => normalizePromptRuleLine(rule))
-    .filter(Boolean);
+  return list.map((rule) => normalizePromptRuleLine(rule)).filter(Boolean);
 }
 
 function normalizePromptTemplate(template) {
@@ -619,80 +659,38 @@ function normalizePromptTemplate(template) {
 }
 
 function normalizePromptRuleLine(value) {
-  return String(value || "")
-    .replace(/\s+/g, " ")
-    .trim();
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function normalizePromptLanguageRules(languageRules) {
   const rules = {};
+
   if (!languageRules || typeof languageRules !== "object") {
     return rules;
   }
 
-  for (const [languageCode, value] of Object.entries(languageRules)) {
+  for (const [key, value] of Object.entries(languageRules)) {
     if (!value || typeof value !== "object") {
       continue;
     }
 
-    const code = String(languageCode || "").toLowerCase().trim();
+    const code = String(key || "").toLowerCase().trim();
+
     if (!code) {
       continue;
     }
 
     const styleRule = normalizePromptRuleLine(value.style_rule);
     const extraRules = normalizePromptRuleList(value.extra_rules);
+
     if (!styleRule && !extraRules.length) {
       continue;
     }
 
-    rules[code] = {
-      style_rule: styleRule,
-      extra_rules: extraRules
-    };
+    rules[code] = { style_rule: styleRule, extra_rules: extraRules };
   }
 
   return rules;
-}
-
-function getPromptRulesForLanguage(targetLanguage) {
-  const languageCode = String(targetLanguage || "").toLowerCase();
-  const config = PROMPT_RULES_CONFIG || {};
-  const commonRules = Array.isArray(config.common_rules) ? config.common_rules : [];
-  const languageRules = config.language_rules && typeof config.language_rules === "object" ? config.language_rules : {};
-  const defaultRules = languageRules.default || {};
-  const specificRules = languageRules[languageCode] || {};
-  const mergedRules = [...commonRules];
-  const styleRule = specificRules.style_rule || defaultRules.style_rule;
-  if (styleRule) {
-    mergedRules.push(styleRule);
-  }
-
-  const extraRules = [...(defaultRules.extra_rules || []), ...(specificRules.extra_rules || [])];
-  for (const rule of extraRules) {
-    const normalized = normalizePromptRuleLine(rule);
-    if (normalized) {
-      mergedRules.push(normalized);
-    }
-  }
-
-  return Array.from(new Set(mergedRules));
-}
-
-function getPromptTemplate() {
-  const template = PROMPT_RULES_CONFIG && PROMPT_RULES_CONFIG.prompt_template;
-  if (!template) {
-    throw new Error("Prompt template is not loaded.");
-  }
-  return template;
-}
-
-function applyPromptTemplate(template, variables) {
-  const source = String(template || "");
-  return source.replace(/\{\{([a-z_]+)\}\}/gi, (fullMatch, key) => {
-    const value = variables && Object.prototype.hasOwnProperty.call(variables, key) ? variables[key] : fullMatch;
-    return String(value || "");
-  });
 }
 
 function resolveLanguageName(code) {
@@ -712,16 +710,18 @@ function normalizeSegment(value) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+// ── Token Estimation ──
+
 function estimateOutputTokens(segments) {
   const joined = segments.join(" ");
-  const estimated = Math.ceil(joined.length / 4.2);
-  return Math.max(estimated, 256);
+  return Math.max(Math.ceil(joined.length / 4.2), 256);
 }
 
 function estimateInputTokens(prompt) {
-  const chars = String(prompt || "").length;
-  return Math.max(64, Math.ceil(chars / 3.8));
+  return Math.max(64, Math.ceil(String(prompt || "").length / 3.8));
 }
+
+// ── Concurrency ──
 
 async function mapChunksWithConcurrency(chunks, concurrency, worker) {
   if (!chunks.length) {
@@ -732,19 +732,16 @@ async function mapChunksWithConcurrency(chunks, concurrency, worker) {
   let cursor = 0;
 
   async function runWorker() {
-    while (true) {
-      const currentIndex = cursor;
+    while (cursor < chunks.length) {
+      const index = cursor;
       cursor += 1;
-      if (currentIndex >= chunks.length) {
-        return;
-      }
-
-      results[currentIndex] = await worker(chunks[currentIndex], currentIndex);
+      results[index] = await worker(chunks[index], index);
     }
   }
 
   const workerCount = Math.max(1, Math.min(concurrency, chunks.length));
   const runners = [];
+
   for (let i = 0; i < workerCount; i++) {
     runners.push(runWorker());
   }
@@ -753,15 +750,15 @@ async function mapChunksWithConcurrency(chunks, concurrency, worker) {
   return results;
 }
 
+// ── Gemini API ──
+
 async function callGeminiApi(action, body) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:${action}?key=${encodeURIComponent(GEMINI_API_KEY)}`;
 
   return retry(async () => {
     const response = await fetch(url, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     });
 
@@ -769,8 +766,7 @@ async function callGeminiApi(action, body) {
       const text = await response.text();
       const status = response.status;
       const retryable = status === 429 || status >= 500;
-      const message = `Gemini API error (${status}): ${trimForLog(text)}`;
-      const error = new Error(message);
+      const error = new Error(`Gemini API error (${status}): ${trimForLog(text)}`);
       error.retryable = retryable;
       throw error;
     }
@@ -781,11 +777,13 @@ async function callGeminiApi(action, body) {
 
 function extractResponseText(responseJson) {
   const candidates = responseJson && responseJson.candidates;
+
   if (!Array.isArray(candidates) || !candidates.length) {
     throw new Error("Gemini did not return any candidate response.");
   }
 
   const parts = candidates[0].content && candidates[0].content.parts;
+
   if (!Array.isArray(parts) || !parts.length) {
     throw new Error("Gemini response content parts are empty.");
   }
@@ -793,16 +791,21 @@ function extractResponseText(responseJson) {
   return parts.map((part) => part.text || "").join("\n").trim();
 }
 
+// ── Response Parsing ──
+
 function parseGeminiJson(text, segments) {
   const input = String(text || "").trim();
-  const normalizedFromJson = tryParseJsonCandidates(input, segments);
-  if (normalizedFromJson) {
-    return normalizedFromJson;
+
+  const fromJson = tryParseJsonCandidates(input, segments);
+
+  if (fromJson) {
+    return fromJson;
   }
 
-  const normalizedFromPairs = parseIndexTextPairs(input, segments);
-  if (normalizedFromPairs) {
-    return normalizedFromPairs;
+  const fromPairs = parseIndexTextPairs(input, segments);
+
+  if (fromPairs) {
+    return fromPairs;
   }
 
   return { translations: [] };
@@ -829,10 +832,11 @@ function tryParseJsonCandidates(text, segments) {
     try {
       const parsed = JSON.parse(candidate);
       const normalized = normalizeGeminiPayload(parsed, segments);
+
       if (normalized) {
         return normalized;
       }
-    } catch (error) {
+    } catch (_) {
       // Try next candidate.
     }
   }
@@ -841,7 +845,8 @@ function tryParseJsonCandidates(text, segments) {
 }
 
 function normalizeGeminiPayload(parsed, segments) {
-  const orderedSegmentIndexes = Array.isArray(segments) ? segments.map((item) => item.index) : [];
+  const orderedIndexes = Array.isArray(segments) ? segments.map((item) => item.index) : [];
+
   const list = Array.isArray(parsed)
     ? parsed
     : parsed && typeof parsed === "object" && Array.isArray(parsed.translations)
@@ -864,15 +869,17 @@ function normalizeGeminiPayload(parsed, segments) {
     let text = "";
 
     if (typeof item === "string") {
-      if (i < orderedSegmentIndexes.length) {
-        index = orderedSegmentIndexes[i];
+      if (i < orderedIndexes.length) {
+        index = orderedIndexes[i];
         text = item.trim();
       }
     } else if (item && typeof item === "object") {
       index = parseLooseInteger(item.index);
-      if (index === null && i < orderedSegmentIndexes.length) {
-        index = orderedSegmentIndexes[i];
+
+      if (index === null && i < orderedIndexes.length) {
+        index = orderedIndexes[i];
       }
+
       text = extractTextValue(item).trim();
     }
 
@@ -896,6 +903,7 @@ function extractTextValue(item) {
   }
 
   const fields = ["text", "translation", "translatedText", "translated_text", "output", "value"];
+
   for (const field of fields) {
     if (typeof item[field] === "string") {
       return item[field];
@@ -922,7 +930,8 @@ function parseIndexTextPairs(text, segments) {
     return null;
   }
 
-  const orderedSegmentIndexes = Array.isArray(segments) ? segments.map((item) => item.index) : [];
+  const orderedIndexes = Array.isArray(segments) ? segments.map((item) => item.index) : [];
+
   const pairRegexes = [
     /"index"\s*:\s*(-?\d+)[\s\S]{0,300}?"text"\s*:\s*"((?:\\.|[^"\\])*)"/g,
     /"text"\s*:\s*"((?:\\.|[^"\\])*)"[\s\S]{0,300}?"index"\s*:\s*(-?\d+)/g,
@@ -934,32 +943,30 @@ function parseIndexTextPairs(text, segments) {
   for (const regex of pairRegexes) {
     regex.lastIndex = 0;
     let match;
+
     while ((match = regex.exec(text)) !== null) {
       const first = match[1] || "";
       const second = match[2] || "";
-
       const hasIndexFirst = /^-?\d+$/.test(String(first).trim());
       const index = hasIndexFirst ? Number(first) : Number(second);
       const rawText = hasIndexFirst ? second : first;
-      const cleanedText = decodeEscapedJsonString(rawText).trim();
+      const cleaned = decodeEscapedJsonString(rawText).trim();
 
-      if (Number.isInteger(index) && cleanedText) {
-        map.set(index, cleanedText);
+      if (Number.isInteger(index) && cleaned) {
+        map.set(index, cleaned);
       }
     }
   }
 
-  if (!map.size && orderedSegmentIndexes.length) {
-    const lines = text
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
+  if (!map.size && orderedIndexes.length) {
+    const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
 
-    if (lines.length >= orderedSegmentIndexes.length) {
-      for (let i = 0; i < orderedSegmentIndexes.length; i++) {
+    if (lines.length >= orderedIndexes.length) {
+      for (let i = 0; i < orderedIndexes.length; i++) {
         const line = lines[i].replace(/^\s*[-*]\s*/, "");
+
         if (line) {
-          map.set(orderedSegmentIndexes[i], line);
+          map.set(orderedIndexes[i], line);
         }
       }
     }
@@ -976,9 +983,10 @@ function parseIndexTextPairs(text, segments) {
 
 function decodeEscapedJsonString(value) {
   const text = String(value || "");
+
   try {
     return JSON.parse(`"${text}"`);
-  } catch (error) {
+  } catch (_) {
     return text
       .replace(/\\n/g, "\n")
       .replace(/\\t/g, "\t")
@@ -1003,13 +1011,13 @@ function extractJsonCandidates(text) {
         escaped = false;
       } else if (ch === "\\") {
         escaped = true;
-      } else if (ch === "\"") {
+      } else if (ch === '"') {
         inString = false;
       }
       continue;
     }
 
-    if (ch === "\"") {
+    if (ch === '"') {
       inString = true;
       continue;
     }
@@ -1028,6 +1036,7 @@ function extractJsonCandidates(text) {
       }
 
       const expected = ch === "}" ? "{" : "[";
+
       if (stack[stack.length - 1] !== expected) {
         stack.length = 0;
         start = -1;
@@ -1035,6 +1044,7 @@ function extractJsonCandidates(text) {
       }
 
       stack.pop();
+
       if (!stack.length && start !== -1) {
         candidates.push(input.slice(start, i + 1));
         start = -1;
@@ -1045,6 +1055,8 @@ function extractJsonCandidates(text) {
   return candidates;
 }
 
+// ── Utilities ──
+
 async function retry(fn, attempts) {
   let lastError;
 
@@ -1053,12 +1065,12 @@ async function retry(fn, attempts) {
       return await fn();
     } catch (error) {
       lastError = error;
+
       if (!error.retryable || i === attempts - 1) {
         break;
       }
 
-      const backoff = 500 * (i + 1);
-      await sleep(backoff);
+      await sleep(500 * (i + 1));
     }
   }
 
@@ -1069,10 +1081,26 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function log(level, message) {
+  const timestamp = new Date().toISOString();
+  const prefix = `[${timestamp}] [${level.toUpperCase()}]`;
+  const output = `${prefix} ${message}`;
+
+  if (level === "error") {
+    console.error(output);
+  } else if (level === "warn") {
+    console.warn(output);
+  } else {
+    console.log(output);
+  }
+}
+
 function trimForLog(text) {
   const normalized = String(text || "").replace(/\s+/g, " ").trim();
   return normalized.length > 220 ? normalized.slice(0, 220) + "..." : normalized;
 }
+
+// ── HTTP Helpers ──
 
 function setCorsHeaders(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -1091,6 +1119,7 @@ function readJsonBody(req) {
 
     req.on("data", (chunk) => {
       raw += chunk;
+
       if (raw.length > 5 * 1024 * 1024) {
         reject(new Error("Request body is too large."));
       }
@@ -1104,7 +1133,7 @@ function readJsonBody(req) {
 
       try {
         resolve(JSON.parse(raw));
-      } catch (error) {
+      } catch (_) {
         reject(new Error("Failed to parse JSON body."));
       }
     });

@@ -9,54 +9,51 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
   if (!request || !request.type) {
     return;
   }
 
-  if (request.type === "startTranslation") {
-    const targetLanguage = request.targetLanguage || DEFAULT_TARGET_LANGUAGE;
+  const handlers = {
+    startTranslation: () => handleStartTranslation(request, sendResponse),
+    getActiveTranslationState: () => handleGetTranslationState(sendResponse),
+    translateSubtitles: () => handleTranslateSubtitles(request, sendResponse)
+  };
 
-    triggerTranslationForActiveTab(targetLanguage)
-      .then(() => {
-        sendResponse({ ok: true });
-      })
-      .catch((error) => {
-        sendResponse({ ok: false, error: error.message });
-      });
+  const handler = handlers[request.type];
 
-    return true;
-  }
-
-  if (request.type === "getActiveTranslationState") {
-    getActiveTabTranslationState()
-      .then((state) => {
-        sendResponse({ ok: true, state });
-      })
-      .catch((error) => {
-        sendResponse({ ok: false, error: error.message });
-      });
-
-    return true;
-  }
-
-  if (request.type === "translateSubtitles") {
-    translateWithGemini(request.payload)
-      .then((data) => {
-        sendResponse({
-          ok: true,
-          translations: data.translations,
-          mode: data.mode,
-          tokenInfo: data.tokenInfo
-        });
-      })
-      .catch((error) => {
-        sendResponse({ ok: false, error: error.message });
-      });
-
+  if (handler) {
+    handler();
     return true;
   }
 });
+
+function handleStartTranslation(request, sendResponse) {
+  const targetLanguage = request.targetLanguage || DEFAULT_TARGET_LANGUAGE;
+
+  triggerTranslationForActiveTab(targetLanguage)
+    .then(() => sendResponse({ ok: true }))
+    .catch((error) => sendResponse({ ok: false, error: error.message }));
+}
+
+function handleGetTranslationState(sendResponse) {
+  getActiveTabTranslationState()
+    .then((state) => sendResponse({ ok: true, state }))
+    .catch((error) => sendResponse({ ok: false, error: error.message }));
+}
+
+function handleTranslateSubtitles(request, sendResponse) {
+  translateWithGemini(request.payload)
+    .then((data) => {
+      sendResponse({
+        ok: true,
+        translations: data.translations,
+        mode: data.mode,
+        tokenInfo: data.tokenInfo
+      });
+    })
+    .catch((error) => sendResponse({ ok: false, error: error.message }));
+}
 
 function queryActiveTab() {
   return new Promise((resolve) => {
@@ -122,7 +119,7 @@ async function getActiveTabTranslationState() {
 }
 
 async function translateWithGemini(payload) {
-  const safePayload = {
+  const body = {
     segments: (payload && payload.segments) || [],
     sourceLanguage: (payload && payload.sourceLanguage) || "auto",
     targetLanguage: (payload && payload.targetLanguage) || DEFAULT_TARGET_LANGUAGE
@@ -130,26 +127,28 @@ async function translateWithGemini(payload) {
 
   const response = await fetch(TRANSLATE_ENDPOINT, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify(safePayload)
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
   });
 
   if (!response.ok) {
     let errorText = "Gemini proxy did not return a valid response.";
+
     try {
       const errorPayload = await response.json();
+
       if (errorPayload && errorPayload.error) {
         errorText = errorPayload.error;
       }
-    } catch (err) {
+    } catch (_) {
       // Keep default message.
     }
+
     throw new Error(errorText);
   }
 
   const data = await response.json();
+
   if (!data || !Array.isArray(data.translations)) {
     throw new Error("Gemini proxy returned an invalid response.");
   }

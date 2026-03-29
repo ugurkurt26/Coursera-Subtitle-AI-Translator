@@ -1,6 +1,4 @@
 const DEFAULT_TARGET_LANGUAGE = "tr";
-const DEFAULT_BUTTON_TEXT = "Translate Video";
-const APPLIED_BUTTON_TEXT = "Translation Applied";
 
 const LANGUAGES = [
   { code: "tr", label: "Turkish" },
@@ -13,103 +11,150 @@ const LANGUAGES = [
   { code: "ru", label: "Russian" },
   { code: "ja", label: "Japanese" },
   { code: "ko", label: "Korean" },
-  { code: "zh", label: "Chinese" },
+  { code: "zh", label: "Chinese (Simplified)" },
   { code: "hi", label: "Hindi" },
   { code: "id", label: "Indonesian" }
 ];
 
 const languageSelect = document.getElementById("languageSelect");
 const translateButton = document.getElementById("translateButton");
+const buttonLabel = document.getElementById("buttonLabel");
 const statusText = document.getElementById("statusText");
+const progressContainer = document.getElementById("progressContainer");
+const progressFill = document.getElementById("progressFill");
+const progressText = document.getElementById("progressText");
 
 initializePopup();
 
 function initializePopup() {
   renderLanguageOptions();
-
-  chrome.storage.sync.get({ targetLanguage: DEFAULT_TARGET_LANGUAGE }, (items) => {
-    languageSelect.value = items.targetLanguage || DEFAULT_TARGET_LANGUAGE;
-  });
-
-  setButtonState(false);
-  setStatus("", false);
-
-  chrome.runtime.sendMessage({ type: "getActiveTranslationState" }, (response) => {
-    if (chrome.runtime.lastError || !response || !response.ok) {
-      setStatus("Could not read translation state. Refresh the page and try again.", true);
-      return;
-    }
-
-    const state = response.state || {};
-    if (state.applied) {
-      setButtonState(true);
-      setStatus("Translation is already applied for this video.", false);
-      return;
-    }
-
-    if (state.inProgress) {
-      setButtonState(true, "Translating...");
-      setStatus("Translation is currently in progress.", false);
-    }
-  });
-
+  restoreSavedLanguage();
+  refreshTranslationState();
   translateButton.addEventListener("click", onTranslateClick);
 }
 
 function renderLanguageOptions() {
-  languageSelect.innerHTML = "";
-
-  for (const language of LANGUAGES) {
+  for (const lang of LANGUAGES) {
     const option = document.createElement("option");
-    option.value = language.code;
-    option.textContent = language.label;
+    option.value = lang.code;
+    option.textContent = lang.label;
     languageSelect.appendChild(option);
   }
 }
 
-function setStatus(message, isError) {
-  statusText.textContent = message;
-  statusText.style.color = isError ? "#b42318" : "#134e29";
+function restoreSavedLanguage() {
+  chrome.storage.sync.get({ targetLanguage: DEFAULT_TARGET_LANGUAGE }, (items) => {
+    languageSelect.value = items.targetLanguage || DEFAULT_TARGET_LANGUAGE;
+  });
 }
 
-function setButtonState(applied, customText) {
-  translateButton.disabled = applied;
-  translateButton.textContent = customText || (applied ? APPLIED_BUTTON_TEXT : DEFAULT_BUTTON_TEXT);
+function refreshTranslationState() {
+  setButtonIdle();
+  setStatus("", "");
+
+  chrome.runtime.sendMessage({ type: "getActiveTranslationState" }, (response) => {
+    if (chrome.runtime.lastError || !response || !response.ok) {
+      setStatus("Could not read translation state. Refresh the page.", "error");
+      return;
+    }
+
+    const state = response.state || {};
+
+    if (state.applied) {
+      setButtonApplied();
+      setStatus("Translation is already applied for this video.", "success");
+      return;
+    }
+
+    if (state.inProgress) {
+      setButtonBusy("Translating...");
+      showProgress(true);
+      setStatus("Translation is in progress.", "");
+    }
+  });
 }
 
 function onTranslateClick() {
-  const selectedLanguage = languageSelect.value || DEFAULT_TARGET_LANGUAGE;
+  const targetLanguage = languageSelect.value || DEFAULT_TARGET_LANGUAGE;
 
-  setButtonState(true, "Starting...");
-  setStatus("Starting translation...", false);
+  setButtonBusy("Downloading VTT...");
+  showProgress(true);
+  setStatus("Downloading subtitle file and starting translation...", "");
 
-  chrome.storage.sync.set({ targetLanguage: selectedLanguage }, () => {
+  chrome.storage.sync.set({ targetLanguage }, () => {
     chrome.runtime.sendMessage(
-      {
-        type: "startTranslation",
-        targetLanguage: selectedLanguage
-      },
+      { type: "startTranslation", targetLanguage },
       (response) => {
+        hideProgress();
+
         if (chrome.runtime.lastError) {
-          setButtonState(false);
-          setStatus("Failed to communicate with the extension.", true);
+          setButtonIdle();
+          setStatus("Failed to communicate with the extension.", "error");
           return;
         }
 
         if (!response || !response.ok) {
-          const message = (response && response.error) || "Failed to start translation.";
+          const message = (response && response.error) || "Translation failed.";
+
           if (/already/i.test(message)) {
-            setButtonState(true);
+            setButtonApplied();
           } else {
-            setButtonState(false);
+            setButtonIdle();
           }
-          setStatus(message, true);
+
+          setStatus(message, "error");
           return;
         }
 
-        setButtonState(true);
-        setStatus("Translation applied.", false);
+        setButtonApplied();
+        setStatus("Translation applied successfully.", "success");
       }
     );
   });
+}
+
+function setButtonIdle() {
+  translateButton.disabled = false;
+  translateButton.classList.remove("applied");
+  buttonLabel.textContent = "Translate Subtitles";
+}
+
+function setButtonBusy(label) {
+  translateButton.disabled = true;
+  translateButton.classList.remove("applied");
+  buttonLabel.textContent = label || "Translating...";
+}
+
+function setButtonApplied() {
+  translateButton.disabled = true;
+  translateButton.classList.add("applied");
+  buttonLabel.textContent = "Translation Applied";
+}
+
+function setStatus(message, type) {
+  statusText.textContent = message;
+  statusText.className = "status";
+
+  if (type) {
+    statusText.classList.add(type);
+  }
+}
+
+function showProgress(indeterminate) {
+  progressContainer.hidden = false;
+  progressFill.style.width = indeterminate ? "" : "0%";
+  progressFill.classList.toggle("indeterminate", !!indeterminate);
+  progressText.textContent = indeterminate ? "Processing..." : "";
+}
+
+function hideProgress() {
+  progressFill.classList.remove("indeterminate");
+  progressFill.style.width = "100%";
+  progressText.textContent = "Done";
+
+  setTimeout(() => {
+    progressContainer.hidden = true;
+    progressFill.style.width = "0%";
+    progressText.textContent = "";
+  }, 800);
 }

@@ -8,11 +8,37 @@
   </head>
   <body>
     <main class="popup">
-      <h1>Coursera Subtitle AI</h1>
-      <label for="languageSelect">Translation language</label>
-      <select id="languageSelect"></select>
-      <button id="translateButton" type="button">Translate Video</button>
-      <p id="statusText" class="status"></p>
+      <header class="popup-header">
+        <svg class="popup-logo" width="22" height="22" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="4" width="20" height="14" rx="2" stroke="currentColor" stroke-width="1.8"/>
+          <path d="M7 21h10M12 18v3" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M6 10h4M6 13h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+          <path d="M16 9l-2 2 2 2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <h1>Subtitle AI Translator</h1>
+      </header>
+
+      <div class="popup-body">
+        <label for="languageSelect">Target language</label>
+        <select id="languageSelect" aria-label="Select target language"></select>
+
+        <button id="translateButton" type="button">
+          <span id="buttonLabel">Translate Subtitles</span>
+        </button>
+
+        <div class="progress-container" id="progressContainer" hidden>
+          <div class="progress-bar">
+            <div class="progress-fill" id="progressFill"></div>
+          </div>
+          <p class="progress-text" id="progressText"></p>
+        </div>
+
+        <p id="statusText" class="status" role="status" aria-live="polite"></p>
+      </div>
+
+      <footer class="popup-footer">
+        <span>Powered by Gemini AI</span>
+      </footer>
     </main>
 
     <script src="popup.js"></script>
