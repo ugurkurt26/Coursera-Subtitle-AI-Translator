@@ -1,142 +1,90 @@
 # Coursera Subtitle AI Translator
 
-A Chrome extension that translates Coursera video subtitles using AI-powered semantic grouping. It downloads the WebVTT subtitle file directly from the page, groups cues into coherent semantic units, and translates them through a local Gemini proxy — preserving meaning across sentence boundaries.
+Translate Coursera subtitles with Gemini, ChatGPT, Claude, or DeepSeek.
 
-## Features
+## Privacy
 
-- **Semantic grouping** — Cues are merged into translation units based on timestamp gaps and sentence boundaries, so multi-cue thoughts are translated together instead of fragment-by-fragment.
-- **VTT-first approach** — Downloads the official WebVTT file from Coursera's Downloads section for reliable, timestamp-aware processing.
-- **Technical term protection** — English technical terms, acronyms, CLI commands, and code identifiers are detected and shielded from mistranslation.
-- **Language-specific rules** — Per-language prompt rules handle suffix morphology (Turkish), gender agreement (French/Spanish), case governance (German/Russian), and more.
-- **13 target languages** — Turkish, Spanish, French, German, Portuguese, Italian, Arabic, Russian, Japanese, Korean, Chinese, Hindi, Indonesian.
-- **Smart chunking** — Large transcripts are automatically split into chunks with sliding context windows, translated in parallel, and reassembled in order.
+- API keys are stored only in your local Chrome profile with `chrome.storage.local`.
+- The extension does not upload your keys to a separate backend or external database.
+- Requests are sent directly from the extension to the provider you selected.
 
-## Architecture
+## What It Does
 
-```
-┌──────────────┐      ┌────────────────┐      ┌───────────────────┐
-│  popup.html  │─────▶│  background.js │─────▶│  gemini-proxy.js  │
-│  popup.js    │ msg  │  (service wkr) │ HTTP │  (localhost:8787) │
-└──────────────┘      └───────┬────────┘      └────────┬──────────┘
-                              │ msg                     │ REST
-                      ┌───────▼────────┐      ┌────────▼──────────┐
-                      │   content.js   │      │   Gemini API      │
-                      │ (coursera tab) │      │  (cloud)          │
-                      └────────────────┘      └───────────────────┘
-```
-
-**Data flow:**
-
-1. User clicks **Translate Subtitles** in the popup.
-2. `background.js` relays the request to `content.js` running in the active Coursera tab.
-3. `content.js` finds the VTT download link in the page DOM, fetches the file, parses it, and builds semantic groups.
-4. Grouped segments are sent to `background.js`, which forwards them to the local Gemini proxy.
-5. `gemini-proxy.js` assembles a language-aware prompt (with protected terms and per-language rules), calls the Gemini API, and returns translations.
-6. `content.js` maps translated text back to the video player's TextTrack cues by timestamp matching.
+- Translates Coursera subtitles inside the video player.
+- Shows translated subtitles in the Coursera player.
+- Saves your selected provider, model, and API key in the extension.
+- Keeps technical terms more stable than a plain word-by-word translation.
 
 ## Requirements
 
-| Dependency | Version |
-|---|---|
-| Node.js | 18+ |
-| Chrome / Chromium | 116+ (Manifest V3) |
-| Gemini API key | [Get one here](https://aistudio.google.com/apikey) |
+- Chrome or another Chromium-based browser
+- A Coursera video page with subtitles
+- An API key for one of these providers:
+  - Gemini
+  - ChatGPT
+  - Anthropic
+  - DeepSeek
 
-## Setup
+## Install
 
-### 1. Clone the repository
+1. Open `chrome://extensions`
+2. Turn on `Developer mode`
+3. Click `Load unpacked`
+4. Select this project folder
 
-```bash
-git clone https://github.com/your-username/coursera-subtitle-translate-extension.git
-cd coursera-subtitle-translate-extension
-```
+## Use
 
-### 2. Start the local proxy
+1. Open a Coursera video page.
+2. Make sure the page has loaded its subtitle download link.
+3. Click the extension icon.
+4. Choose the target language.
+5. Choose a provider.
+6. Enter your model and API key.
+7. Click `Save Provider Settings`.
+8. Click `Translate Subtitles`.
 
-```bash
-export GEMINI_API_KEY="your-api-key"
-node gemini-proxy.js
-```
+## Settings
 
-You should see:
+- Provider, model, and API key are stored locally in Chrome.
+- Saved settings are reused automatically.
+- API keys are stored separately for each provider.
+- You can use the preset model list or type a custom model id.
 
-```
-[...] [INFO] Proxy ready at http://127.0.0.1:8787
-[...] [INFO] Model: gemini-2.5-flash
-```
+## Supported Providers
 
-### 3. Load the extension in Chrome
+- Gemini
+- ChatGPT
+- Anthropic
+- DeepSeek
 
-1. Navigate to `chrome://extensions`
-2. Enable **Developer mode** (top-right toggle)
-3. Click **Load unpacked**
-4. Select this project directory
+## Notes
 
-### 4. Translate a video
+- The source subtitle language is treated as English.
+- The translated subtitles appear as a separate AI subtitle option instead of replacing Coursera's built-in subtitle list.
 
-1. Open any Coursera video lecture page.
-2. Make sure the **Downloads** section is visible on the page (it contains the VTT subtitle link).
-3. In the Coursera video player's subtitle menu, make sure **Subtitles off** is selected.
-4. Click the extension icon, select your target language, and click **Translate Subtitles**.
+## Common Issues
 
-> Important: If Coursera's built-in subtitles are set to any language instead of **Subtitles off**, the extension's translated subtitles will not appear.
+### `VTT subtitle download link not found`
 
-## Configuration
+Scroll the page a bit and make sure the video page has fully loaded.
 
-### Environment variables
+### `Failed to communicate with the extension`
 
-All optional unless noted.
+Refresh the Coursera page and try again.
 
-| Variable | Default | Description |
-|---|---|---|
-| `GEMINI_API_KEY` | *(required)* | Your Gemini API key |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | Gemini model identifier |
-| `GEMINI_PROXY_PORT` | `8787` | Local proxy port |
-| `CHUNK_CHAR_LIMIT` | `8000` | Max characters per translation chunk |
-| `CHUNK_CONTEXT_WINDOW` | `4` | Number of preceding segments sent as context |
-| `PARALLEL_CHUNK_CONCURRENCY` | `2` | Parallel Gemini API calls for chunked mode |
-| `PROMPT_RULES_SOURCE` | `prompt-rules.json` | Path or URL to custom prompt rules |
+### Provider API error
 
-### Customization
+Check the API key, selected model, quota, and billing status for that provider.
 
-- **Translation behavior** — Edit [`prompt-rules.json`](prompt-rules.json) to add/modify per-language rules, style guidelines, or prompt templates.
-- **Technical glossary** — Replace [`tech_terms_dictionary.json`](tech_terms_dictionary.json) with your own term list. Supports both `{ "terms": [{ "en": "..." }] }` and `{ "always_protect": [...], "candidate_terms": [...] }` formats.
+### The AI subtitle option does not appear
 
-## Project Structure
+Reload the extension from `chrome://extensions`, refresh the Coursera page, and run translation again.
 
-```
-├── manifest.json              # Chrome MV3 extension manifest
-├── popup.html                 # Extension popup UI
-├── popup.css                  # Popup styles
-├── popup.js                   # Popup logic and state management
-├── background.js              # Service worker — message routing
-├── content.js                 # VTT download, parsing, semantic grouping, cue replacement
-├── gemini-proxy.js            # Local Node.js proxy — prompt assembly, Gemini API, chunking
-├── prompt-rules.json          # Per-language translation rules and prompt template
-├── tech_terms_dictionary.json # Technical term glossary for term protection
-└── LICENSE                    # MIT License
-```
+## Files You May Want To Edit
 
-## How Semantic Grouping Works
-
-Traditional subtitle translators process each cue independently, which breaks sentences that span multiple cues. This extension uses a three-signal approach:
-
-| Signal | Behavior |
-|---|---|
-| **Timestamp gap** (> 1.5 s) | Always starts a new group — natural speech pauses indicate topic boundaries |
-| **Sentence boundary** + min size (80 chars) | Splits at sentence ends when the group has accumulated enough context |
-| **Max size** (500 chars) | Soft limit — breaks at the next sentence end. Hard limit at 750 chars |
-
-This means a thought like *"In this video, we're going to be talking about an intro to Threads and / Multithreading."* (split across two cues) gets translated as a single unit.
-
-## Troubleshooting
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| "VTT subtitle download link not found" | Downloads section not rendered | Scroll down on the video page to load the Downloads section |
-| "Failed to communicate with the extension" | Content script not injected | Refresh the Coursera page and try again |
-| "Gemini proxy did not return a valid response" | Proxy not running or model error | Check terminal for proxy logs, verify `GEMINI_API_KEY` |
-| Subtitles unchanged after translation | Coursera's native subtitle track is enabled and overrides the translated track | In the player subtitle menu, select **Subtitles off**, then run translation again |
+- [`prompt-rules.json`](prompt-rules.json) for translation rules
+- [`tech_terms_dictionary.json`](tech_terms_dictionary.json) for protected technical terms
+- [`popup.js`](popup.js) if you want to change provider or model options
 
 ## License
 
